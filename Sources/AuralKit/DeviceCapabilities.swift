@@ -46,12 +46,15 @@ extension SpeechSession {
         async let installedLocalesTask = SpeechTranscriber.installedLocales
         async let dictationLocalesTask = DictationTranscriber.supportedLocales
 
-        let supportsSpeechTranscriber = SpeechTranscriber.isAvailable
-        let dictationLocales = await dictationLocalesTask
-        let supportsDictationTranscriber = !dictationLocales.isEmpty
-
         let supportedLocales = await supportedLocalesTask
         let installedLocales = await installedLocalesTask
+        let dictationLocales = await dictationLocalesTask
+
+        // `SpeechTranscriber.isAvailable` is not present on some simulator/runtime combinations
+        // even when the SDK exposes the newer Speech APIs. Infer support from the locale lists so
+        // device capability checks do not hard-link that missing symbol at launch time.
+        let supportsSpeechTranscriber = !supportedLocales.isEmpty || !installedLocales.isEmpty
+        let supportsDictationTranscriber = !dictationLocales.isEmpty
 
         return DeviceCapabilities(
             supportsSpeechTranscriber: supportsSpeechTranscriber,
