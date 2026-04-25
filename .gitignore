@@ -11,6 +11,7 @@ xcuserdata/
 
 ## compatibility with Xcode 3 and earlier (ignoring not required starting Xcode 4)
 build/
+Derived/
 DerivedData/
 *.moved-aside
 *.pbxuser
@@ -47,6 +48,10 @@ playground.xcworkspace
 .swiftpm/
 
 .build/
+
+# Root-level generated project/build output from local package/Xcode iteration.
+/AuralKit.xcodeproj/
+/Derived/
 
 # CocoaPods
 #
