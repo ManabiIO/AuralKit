@@ -5,6 +5,7 @@ import OSLog
 
 private let customVocabularyLogger = Logger(subsystem: "com.auralkit.speech", category: "CustomVocabulary")
 
+@available(iOS 26.0, macOS 26.0, *)
 func logCustomVocabularyError(_ message: StaticString, path: String, error: Error) {
     Task { @MainActor in
         guard SpeechSession.shouldLog(.error) else { return }
@@ -13,6 +14,7 @@ func logCustomVocabularyError(_ message: StaticString, path: String, error: Erro
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
 
     // swiftlint:disable nesting
@@ -142,16 +144,19 @@ extension SpeechSession {
     // swiftlint:enable nesting
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 struct CustomVocabularyCompilation: Sendable {
     let configuration: SFSpeechLanguageModel.Configuration
     let cacheKey: String
     let outputDirectory: URL
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 protocol CustomVocabularyCompiling: Sendable {
     func compile(descriptor: SpeechSession.CustomVocabulary) async throws -> CustomVocabularyCompilation
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 final class CustomVocabularyCompiler: CustomVocabularyCompiling, @unchecked Sendable {
 
     private struct CompilationPaths {

@@ -35,6 +35,7 @@ public struct DeviceCapabilities: Sendable {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
     /// Returns a snapshot of currently supported and installed locales along with transcriber availability.

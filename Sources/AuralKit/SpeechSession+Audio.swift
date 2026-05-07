@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import AVFoundation
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
 

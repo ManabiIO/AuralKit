@@ -4,8 +4,8 @@ import PackageDescription
 let package = Package(
     name: "AuralKit",
     platforms: [
-        .iOS("26.0"),
-        .macOS("26.0"),
+        .iOS("15.0"),
+        .macOS("13.0"),
     ],
     products: [
         .library(

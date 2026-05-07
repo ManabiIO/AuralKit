@@ -1,5 +1,6 @@
 import Foundation
 
+@available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
     /// Async stream that emits lifecycle status updates, beginning with the current status.
     public var statusStream: AsyncStream<Status> {

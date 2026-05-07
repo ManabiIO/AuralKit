@@ -4,6 +4,7 @@ import OSLog
 
 // MARK: - Model Manager
 
+@available(iOS 26.0, macOS 26.0, *)
 actor ModelManager {
 
     private let logger = Logger(subsystem: "com.auralkit.speech", category: "ModelManager")

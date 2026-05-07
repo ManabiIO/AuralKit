@@ -30,6 +30,7 @@ import Speech
 ///
 /// Call `stopTranscribing()` to end capture and unwind the stream. The same instance may be reused
 /// for subsequent transcription sessions.
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 public final class SpeechSession {
 

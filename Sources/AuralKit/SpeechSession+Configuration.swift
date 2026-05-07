@@ -4,6 +4,7 @@ import Speech
 @preconcurrency import AVFoundation
 #endif
 
+@available(iOS 26.0, macOS 26.0, *)
 public extension SpeechSession {
 
     /// Default reporting options: provides partial results and alternative transcriptions.

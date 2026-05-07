@@ -1,6 +1,7 @@
 import Foundation
 import OSLog
 
+@available(iOS 26.0, macOS 26.0, *)
 public extension SpeechSession {
 
     /// Logging levels supported by `SpeechSession`.

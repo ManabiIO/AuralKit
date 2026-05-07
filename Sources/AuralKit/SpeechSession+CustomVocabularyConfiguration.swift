@@ -3,6 +3,7 @@ import Speech
 import CryptoKit
 import OSLog
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
 

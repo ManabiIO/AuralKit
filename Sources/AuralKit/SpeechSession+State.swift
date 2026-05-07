@@ -1,5 +1,6 @@
 import Foundation
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
     /// Update the session status and emit changes when state transitions occur.

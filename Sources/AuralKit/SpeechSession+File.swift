@@ -3,6 +3,7 @@ import AVFoundation
 import Speech
 
 /// Configuration used by `SpeechSession` when transcribing an audio file from disk.
+@available(iOS 26.0, macOS 26.0, *)
 public struct FileTranscriptionOptions {
     /// Optional contextual strings to improve transcription accuracy.
     public var contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]?
@@ -52,6 +53,7 @@ public struct FileTranscriptionOptions {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 public extension SpeechSession {
     /// Stream transcription results for an audio file from disk.
@@ -130,6 +132,7 @@ public extension SpeechSession {
 
 // MARK: - Private helpers
 
+@available(iOS 26.0, macOS 26.0, *)
 private extension SpeechSession {
     func startFilePipeline(
         with streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation,

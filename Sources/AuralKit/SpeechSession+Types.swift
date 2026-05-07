@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Speech
 
+@available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
 
     /// Discrete lifecycle stages for a speech transcription session.
