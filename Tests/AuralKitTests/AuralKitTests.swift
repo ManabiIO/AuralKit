@@ -8,6 +8,7 @@ struct SpeechSessionStateTests {
     @Test("Model download progress starts nil")
     @MainActor
     func modelDownloadProgressStartsNil() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         #expect(await session.modelDownloadProgress == nil)
     }
@@ -15,6 +16,7 @@ struct SpeechSessionStateTests {
     @Test("Stop transcribing without session is a no-op")
     @MainActor
     func stopTranscribingWithoutSessionIsNoOp() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         await session.stopTranscribing()
         #expect(await session.modelDownloadProgress == nil)
@@ -24,6 +26,7 @@ struct SpeechSessionStateTests {
     @Test("Pause when idle does nothing")
     @MainActor
     func pauseWhenIdleDoesNothing() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         #expect(session.status == .idle)
 
@@ -35,6 +38,7 @@ struct SpeechSessionStateTests {
     @Test("Resume when idle does nothing")
     @MainActor
     func resumeWhenIdleDoesNothing() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         #expect(session.status == .idle)
 
@@ -46,30 +50,38 @@ struct SpeechSessionStateTests {
     @Test("Status stream broadcasts updates to multiple subscribers")
     @MainActor
     func statusStreamBroadcastsToMultipleSubscribers() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
-
-        var iteratorA = session.statusStream.makeAsyncIterator()
-        var iteratorB = session.statusStream.makeAsyncIterator()
-
-        let firstA = try await awaitResult {
-            await iteratorA.next()
-        }
-        let firstB = try await awaitResult {
-            await iteratorB.next()
-        }
-
-        #expect(firstA == .some(.idle))
-        #expect(firstB == .some(.idle))
-
+        let streamA = session.statusStream
+        let streamB = session.statusStream
+        let readyA = AsyncStream<Void>.makeStream()
+        let readyB = AsyncStream<Void>.makeStream()
         let nextA = Task {
-            await iteratorA.next()
+            var iterator = streamA.makeAsyncIterator()
+            let initial = await iterator.next()
+            readyA.continuation.yield(())
+            let next = await iterator.next()
+            return (initial, next)
         }
         let nextB = Task {
-            await iteratorB.next()
+            var iterator = streamB.makeAsyncIterator()
+            let initial = await iterator.next()
+            readyB.continuation.yield(())
+            let next = await iterator.next()
+            return (initial, next)
         }
         defer {
             nextA.cancel()
             nextB.cancel()
+        }
+
+        try await awaitResult {
+            var iterator = readyA.stream.makeAsyncIterator()
+            _ = await iterator.next()
+        }
+        try await awaitResult {
+            var iterator = readyB.stream.makeAsyncIterator()
+            _ = await iterator.next()
         }
 
         session.setStatus(.preparing)
@@ -80,8 +92,10 @@ struct SpeechSessionStateTests {
         let valueB = try await awaitResult {
             await nextB.value
         }
-        #expect(valueA == .some(.preparing))
-        #expect(valueB == .some(.preparing))
+        #expect(valueA.0 == .some(.idle))
+        #expect(valueA.1 == .some(.preparing))
+        #expect(valueB.0 == .some(.idle))
+        #expect(valueB.1 == .some(.preparing))
     }
 }
 
@@ -91,6 +105,7 @@ struct SpeechSessionVoiceActivationTests {
     @Test("Voice activation configuration toggles state")
     @MainActor
     func voiceActivationConfigurationTogglesState() {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         #expect(session.isVoiceActivationEnabled == false)
         #expect(session.speechDetectorResultsStream == nil)
@@ -110,6 +125,7 @@ struct SpeechSessionVoiceActivationTests {
     @Test("Disabling voice activation resets isSpeechDetected")
     @MainActor
     func disablingVoiceActivationResetsSpeechDetected() {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         session.configureVoiceActivation(reportResults: true)
@@ -127,16 +143,17 @@ struct SpeechSessionAudioInputStreamTests {
     @Test("Audio input stream fans out nil updates")
     @MainActor
     func audioInputStreamBroadcastsNil() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
-
-        var iteratorA = session.audioInputConfigurationStream.makeAsyncIterator()
-        var iteratorB = session.audioInputConfigurationStream.makeAsyncIterator()
-
+        let streamA = session.audioInputConfigurationStream
+        let streamB = session.audioInputConfigurationStream
         let valueA = Task {
-            await iteratorA.next()
+            var iteratorA = streamA.makeAsyncIterator()
+            return await iteratorA.next()
         }
         let valueB = Task {
-            await iteratorB.next()
+            var iteratorB = streamB.makeAsyncIterator()
+            return await iteratorB.next()
         }
         defer {
             valueA.cancel()
@@ -162,16 +179,19 @@ struct SpeechSessionAudioInputStreamTests {
 @Suite("SpeechSession Logging")
 struct SpeechSessionLoggingTests {
 
-    @Test("Logging level can be configured globally", arguments: SpeechSession.LogLevel.allCases)
+    @Test("Logging level can be configured globally")
     @MainActor
-    func loggingLevelRoundTrips(level: SpeechSession.LogLevel) async {
-        await SpeechSessionLoggingLock.shared.withLock {
-            let originalLevel = SpeechSession.logging
-            defer { SpeechSession.logging = originalLevel }
+    func loggingLevelRoundTrips() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        for level in SpeechSession.LogLevel.allCases {
+            await SpeechSessionLoggingLock.shared.withLock {
+                let originalLevel = SpeechSession.logging
+                defer { SpeechSession.logging = originalLevel }
 
-            SpeechSession.logging = level
+                SpeechSession.logging = level
 
-            #expect(SpeechSession.logging == level)
+                #expect(SpeechSession.logging == level)
+            }
         }
     }
 }
@@ -181,6 +201,7 @@ struct SpeechSessionCustomVocabularyTests {
 
     @Test("Custom vocabulary cache key is stable")
     func customVocabularyCacheKeyStable() throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let descriptor = SpeechSession.CustomVocabulary(
             locale: Locale(identifier: "en_US"),
             identifier: "test",
@@ -209,6 +230,7 @@ struct SpeechSessionCustomVocabularyTests {
     @Test("Configuring custom vocabulary caches compilation result")
     @MainActor
     func configureCustomVocabularyCachesCompilation() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let compiler = MockCustomVocabularyCompiler()
         let session = SpeechSession(locale: Locale(identifier: "en_US"))
         session.customVocabularyCompiler = compiler
@@ -238,6 +260,7 @@ struct SpeechSessionCustomVocabularyTests {
     @Test("Configuring custom vocabulary rejects mismatched locale")
     @MainActor
     func configureCustomVocabularyRejectsMismatchedLocale() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let compiler = MockCustomVocabularyCompiler()
         let session = SpeechSession(locale: Locale(identifier: "en_US"))
         session.customVocabularyCompiler = compiler
@@ -263,6 +286,7 @@ struct SpeechSessionCustomVocabularyTests {
     @Test("Configuring custom vocabulary requires idle session")
     @MainActor
     func configureCustomVocabularyRequiresIdleSession() async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let compiler = MockCustomVocabularyCompiler()
         let session = SpeechSession(locale: Locale(identifier: "en_US"))
         session.customVocabularyCompiler = compiler
@@ -289,6 +313,8 @@ struct SpeechSessionCustomVocabularyTests {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
+@available(iOS 26.0, macOS 26.0, *)
 actor MockCustomVocabularyCompiler: CustomVocabularyCompiling {
 
     private let baseDirectory: URL

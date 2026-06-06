@@ -8,6 +8,7 @@ struct FileTranscriptionTests {
     @Test("transcribe throws audioFileNotFound for missing file")
     @MainActor
     func transcribeMissingFileThrowsNotFound() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         let missingURL = URL(fileURLWithPath: "/tmp/not-real-")
 
@@ -19,6 +20,7 @@ struct FileTranscriptionTests {
     @Test("transcribe rejects audio exceeding maximum duration")
     @MainActor
     func transcribeRejectsAudioExceedingMaximumDuration() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let tempURL = try createSilenceAudioFile(duration: 2.0)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
@@ -68,6 +70,7 @@ struct FileTranscriptionTests {
     @Test("transcribe throws audioFileInvalidURL for non-file URL")
     @MainActor
     func transcribeNonFileURLThrowsInvalidURL() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         let httpURL = URL(string: "https://example.com/audio.wav")!
 
@@ -79,6 +82,7 @@ struct FileTranscriptionTests {
     @Test("transcribe throws audioFileOutsideAllowedDirectories for restricted path")
     @MainActor
     func transcribeOutsideAllowedDirectoriesThrows() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let tempURL = try createSilenceAudioFile(duration: 0.5)
         defer { try? FileManager.default.removeItem(at: tempURL) }
 
