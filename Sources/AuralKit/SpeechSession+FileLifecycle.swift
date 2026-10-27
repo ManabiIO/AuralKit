@@ -1,4 +1,6 @@
 import Foundation
+import Speech
+import OSLog
 
 /// The three actual tasks belonging to one file stream. Retirement is latched
 /// before cancellation, and only its separate terminal task joins these tasks.
@@ -20,11 +22,64 @@ struct FileTranscriptionHooks {
     var authorize: (@MainActor @Sendable () async throws -> Void)?
     var preparePipeline: (@MainActor @Sendable (FileTranscriptionRun) async throws -> Void)?
     var ingest: (@Sendable () async throws -> Bool)?
+    var finalizeInput: (@MainActor @Sendable () async throws -> Void)?
 }
 
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
+    /// Ending an autonomous analyzer's input does not finish its analysis.
+    /// Keep this run and its reader active while finalization publishes the
+    /// last results. The reader requests retirement after draining them.
+    func finalizeFileInput(_ run: FileTranscriptionRun) async throws {
+        try requireCurrentFileTranscription(run)
+        inputBuilder?.finish()
+        if let finalizeInput = fileTranscriptionHooks?.finalizeInput {
+            try await finalizeInput()
+        } else {
+            try await analyzer?.finalizeAndFinishThroughEndOfInput()
+        }
+    }
+
+    /// Shared by native speech results and lifecycle probes so the latter
+    /// exercise the same admission checks, forwarding and terminal ordering.
+    func makeFileRecognizerTask<Sequence: AsyncSequence>(
+        run: FileTranscriptionRun,
+        results: Sequence,
+        streamContinuation: AsyncThrowingStream<Sequence.Element, Error>.Continuation
+    ) -> Task<Void, Never>
+    where Sequence: Sendable, Sequence.Element: Sendable {
+        Task<Void, Never> { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                for try await result in results {
+                    try self.requireCurrentFileTranscription(run)
+                    streamContinuation.yield(result)
+                }
+                if Self.shouldLog(.notice) {
+                    Self.logger.notice("File recognizer task completed without error")
+                }
+                self.retireFileTranscription(run, error: nil)
+            } catch is CancellationError {
+                if Self.shouldLog(.debug) {
+                    Self.logger.debug("File recognizer task cancelled")
+                }
+                // A results iterator can fail independently of public stop.
+                // Only an already-retired run has a teardown owner to join.
+                if self.fileTranscription === run, !run.retired {
+                    self.retireFileTranscription(run, error: CancellationError())
+                }
+            } catch {
+                if Self.shouldLog(.error) {
+                    Self.logger.error(
+                        "File recognizer task failed: \(error.localizedDescription, privacy: .public)"
+                    )
+                }
+                self.retireFileTranscription(run, error: error)
+            }
+        }
+    }
+
     func requireCurrentFileTranscription(_ run: FileTranscriptionRun) throws {
         try Task.checkCancellation()
         guard fileTranscription === run, !run.retired else {

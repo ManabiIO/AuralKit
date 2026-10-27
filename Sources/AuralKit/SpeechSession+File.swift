@@ -178,11 +178,23 @@ private extension SpeechSession {
                         completed = try await self.feedAudioFile(validation, progressHandler: handler)
                     }
                     try self.requireCurrentFileTranscription(run)
-                    if completed, let handler {
-                        handler(1.0)
+                    guard completed else {
+                        // Cancellation was checked above. An input that ended
+                        // before its declared length is an incomplete read;
+                        // don't leave analysis open or report partial success.
+                        throw SpeechSessionError.audioFileReadFailed(CocoaError(
+                            .fileReadUnknown,
+                            userInfo: [NSLocalizedDescriptionKey: "Audio input ended before all declared frames were read."]
+                        ))
                     }
+                    handler?(1.0)
+                    try await self.finalizeFileInput(run)
                 } catch is CancellationError {
-                    // Swallow cancellation triggered by cleanup.
+                    // A finalizer may fail with CancellationError even when
+                    // public stop did not initiate cancellation.
+                    if self.fileTranscription === run, !run.retired {
+                        self.retireFileTranscription(run, error: CancellationError())
+                    }
                 } catch {
                     self.retireFileTranscription(run, error: error)
                 }
@@ -273,31 +285,9 @@ private extension SpeechSession {
         try requireCurrentFileTranscription(run)
         activeResultKind = .speech
 
-        run.recognizerTask = Task<Void, Never> { [weak self] in
-                guard let self else { return }
-
-                do {
-                    for try await result in transcriber.results {
-                        try self.requireCurrentFileTranscription(run)
-                        streamContinuation.yield(result)
-                    }
-                    if Self.shouldLog(.notice) {
-                        Self.logger.notice("File recognizer task completed without error")
-                    }
-                    self.retireFileTranscription(run, error: nil)
-                } catch is CancellationError {
-                    if Self.shouldLog(.debug) {
-                        Self.logger.debug("File recognizer task cancelled")
-                    }
-                } catch {
-                    if Self.shouldLog(.error) {
-                        Self.logger.error(
-                            "File recognizer task failed: \(error.localizedDescription, privacy: .public)"
-                        )
-                    }
-                    self.retireFileTranscription(run, error: error)
-                }
-        }
+        run.recognizerTask = makeFileRecognizerTask(
+            run: run, results: transcriber.results, streamContinuation: streamContinuation
+        )
 
         streamingMode = .filePlayback
         setStatus(.transcribing)
