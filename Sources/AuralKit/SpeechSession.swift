@@ -90,7 +90,8 @@ public final class SpeechSession {
     // Stream state management
     var continuation: TranscriptionContinuation?
     var recognizerTask: Task<Void, Never>?
-    var fileIngestionTask: Task<Void, Never>?
+    var fileTranscription: FileTranscriptionRun?
+    var fileTranscriptionHooks: FileTranscriptionHooks?
     var streamingMode: StreamingMode = .inactive
 
     // Notification Handling
@@ -278,16 +279,17 @@ public final class SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        newContinuation.onTermination = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.cleanup(cancelRecognizer: true)
-            }
-        }
-
-        guard continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
+        guard continuation == nil, recognizerTask == nil,
+              fileTranscription == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
+        }
+
+        newContinuation.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.fileTranscription == nil else { return }
+                await self.cleanup(cancelRecognizer: true)
+            }
         }
 
         setStatus(.preparing)
@@ -327,7 +329,14 @@ public final class SpeechSession {
     ///
     /// Safe to call even if `startTranscribing()` has not been invoked or the stream has already
     /// completed; the method simply waits for cleanup and returns.
+    /// For file transcription, also waits for setup, file ingestion and result
+    /// delivery to exit before returning. The caller may then release its audio
+    /// file lease or remove its request-owned workspace.
     public func stopTranscribing() async {
+        if let run = fileTranscription {
+            await retireFileTranscription(run, error: nil)?.value
+            return
+        }
         prepareForStop()
         await cleanup(cancelRecognizer: true)
         await finishStream(error: nil)

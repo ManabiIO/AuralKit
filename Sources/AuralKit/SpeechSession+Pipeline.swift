@@ -172,15 +172,19 @@ extension SpeechSession {
     }
 
     func cleanup(cancelRecognizer: Bool) async {
+        if let run = fileTranscription {
+            await retireFileTranscription(run, error: nil)?.value
+            return
+        }
+        await cleanupPipelineResources(cancelRecognizer: cancelRecognizer)
+    }
+
+    func cleanupPipelineResources(cancelRecognizer: Bool, publishIdle: Bool = true) async {
         if Self.shouldLog(.debug) {
             Self.logger.debug("Cleanup started (cancelRecognizer: \(cancelRecognizer, privacy: .public))")
         }
         let task = recognizerTask
         recognizerTask = nil
-
-        let ingestionTask = fileIngestionTask
-        fileIngestionTask = nil
-        ingestionTask?.cancel()
 
         if cancelRecognizer {
             if Self.shouldLog(.debug) {
@@ -197,7 +201,7 @@ extension SpeechSession {
         shouldResumeAfterInterruption = false
 #endif
         await stopTranscriberAndCleanup()
-        setStatus(.idle)
+        if publishIdle { setStatus(.idle) }
         if Self.shouldLog(.debug) {
             Self.logger.debug("Cleanup completed")
         }
