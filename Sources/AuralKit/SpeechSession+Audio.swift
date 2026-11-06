@@ -99,7 +99,8 @@ extension SpeechSession {
     }
 
     private func makeAudioTapHandler() -> AVAudioNodeTapBlock {
-        return { [weak self] buffer, _ in
+        let run = liveTranscription
+        return { [weak self, weak run] buffer, _ in
             guard let bufferCopy = buffer.copy() as? AVAudioPCMBuffer else {
                 if Self.shouldLog(.error) {
                     Self.logger.error("Failed to copy audio buffer for processing.")
@@ -108,20 +109,9 @@ extension SpeechSession {
             }
             let sendableBuffer = SendablePCMBuffer(buffer: bufferCopy)
 
-            Task { @MainActor in
-                guard let self else {
-                    return
-                }
-
-                do {
-                    try await self.processAudioBuffer(sendableBuffer)
-                } catch {
-                    if Self.shouldLog(.error) {
-                        Self.logger.error(
-                            "Audio processing error: \(error.localizedDescription, privacy: .public)"
-                        )
-                    }
-                }
+            Task { @MainActor [weak self, weak run] in
+                guard let self, let run else { return }
+                self.enqueueLiveAudioBuffer(sendableBuffer, run: run)
             }
         }
     }
@@ -185,21 +175,20 @@ extension SpeechSession {
     }
 
     private func handleInterruptionEnded(options: AVAudioSession.InterruptionOptions) async {
-        guard shouldResumeAfterInterruption else { return }
+        guard shouldResumeAfterInterruption, let run = liveTranscription, !run.retired else { return }
         shouldResumeAfterInterruption = false
 
         guard options.contains(.shouldResume) else {
             if Self.shouldLog(.notice) {
                 Self.logger.notice("Audio session interruption ended without resume option; cleaning up session")
             }
-            prepareForStop()
-            await cleanup(cancelRecognizer: true)
-            await finishStream(error: nil)
+            await retireLiveTranscription(run, error: nil)?.value
             return
         }
 
         do {
-            try await setupAudioSession()
+            try await setupAudioSession(liveRun: run)
+            try requireCurrentLiveTranscription(run)
             try startAudioStreaming()
             setStatus(.transcribing)
             if Self.shouldLog(.notice) {
@@ -210,9 +199,7 @@ extension SpeechSession {
                 let description = error.localizedDescription
                 Self.logger.error("Failed to resume after interruption: \(description, privacy: .public)")
             }
-            prepareForStop()
-            await cleanup(cancelRecognizer: true)
-            await finishStream(error: error)
+            await retireLiveTranscription(run, error: error)?.value
         }
     }
 #elseif os(macOS)

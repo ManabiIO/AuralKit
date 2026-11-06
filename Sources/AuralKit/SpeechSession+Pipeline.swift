@@ -72,111 +72,68 @@ extension SpeechSession {
     // MARK: - Pipeline Orchestration
 
     func startSpeechPipeline(
+        run: LiveTranscriptionRun,
         with streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async {
-        do {
-            if Self.shouldLog(.notice) {
-                Self.logger.notice("Starting pipeline setup")
-            }
-            try await ensurePermissions()
-            try await setupAudioSession()
-
-            let transcriber = try await setUpSpeechTranscriber(contextualStrings: contextualStrings)
-            if Self.shouldLog(.info) {
-                Self.logger.info("Transcriber prepared with modules")
-            }
-
-            recognizerTask = createSpeechRecognizerTask(
-                transcriber: transcriber,
-                streamContinuation: streamContinuation
+        await startLivePipeline(run: run, kind: .speech) {
+            let transcriber = try await self.setUpSpeechTranscriber(contextualStrings: contextualStrings)
+            try self.requireCurrentLiveTranscription(run)
+            return self.makeLiveRecognizerTask(
+                run: run, results: transcriber.results, streamContinuation: streamContinuation
             )
-
-            try startAudioStreaming()
-
-            streamingMode = .liveMicrophone
-            setStatus(.transcribing)
-            activeResultKind = .speech
-            if Self.shouldLog(.info) {
-                Self.logger.info("Pipeline started (mode: live microphone)")
-            }
-        } catch {
-            if Self.shouldLog(.error) {
-                Self.logger.error("Pipeline setup failed: \(error.localizedDescription, privacy: .public)")
-            }
-            await finishWithStartupError(error)
         }
     }
 
     func startDictationPipeline(
+        run: LiveTranscriptionRun,
         with streamContinuation: AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async {
-        do {
-            if Self.shouldLog(.notice) {
-                Self.logger.notice("Starting dictation pipeline setup")
-            }
-            try await ensurePermissions()
-            try await setupAudioSession()
-
-            let transcriber = try await setUpDictationTranscriber(contextualStrings: contextualStrings)
-            if Self.shouldLog(.info) {
-                Self.logger.info("Dictation transcriber prepared with modules")
-            }
-
-            recognizerTask = createDictationRecognizerTask(
-                transcriber: transcriber,
-                streamContinuation: streamContinuation
+        await startLivePipeline(run: run, kind: .dictation) {
+            let transcriber = try await self.setUpDictationTranscriber(contextualStrings: contextualStrings)
+            try self.requireCurrentLiveTranscription(run)
+            return self.makeLiveRecognizerTask(
+                run: run, results: transcriber.results, streamContinuation: streamContinuation
             )
+        }
+    }
 
-            try startAudioStreaming()
-
+    private func startLivePipeline(
+        run: LiveTranscriptionRun,
+        kind: TranscriptionResultKind,
+        prepareRecognizer: @MainActor () async throws -> Task<Void, Never>
+    ) async {
+        do {
+            try requireCurrentLiveTranscription(run)
+            if let authorize = liveTranscriptionHooks?.authorize {
+                try await authorize()
+            } else {
+                try await ensurePermissions()
+            }
+            try requireCurrentLiveTranscription(run)
+            if let preparePipeline = liveTranscriptionHooks?.preparePipeline {
+                try await preparePipeline(run, kind)
+            } else {
+                try await setupAudioSession(liveRun: run)
+                try requireCurrentLiveTranscription(run)
+                run.recognizerTask = try await prepareRecognizer()
+            }
+            try requireCurrentLiveTranscription(run)
+            recognizerTask = run.recognizerTask
+            if let startAudio = liveTranscriptionHooks?.startAudio {
+                try startAudio()
+            } else {
+                try startAudioStreaming()
+            }
+            try requireCurrentLiveTranscription(run)
             streamingMode = .liveMicrophone
+            activeResultKind = kind
             setStatus(.transcribing)
-            activeResultKind = .dictation
-            if Self.shouldLog(.info) {
-                Self.logger.info("Dictation pipeline started (mode: live microphone)")
-            }
         } catch {
-            if Self.shouldLog(.error) {
-                Self.logger.error("Dictation pipeline setup failed: \(error.localizedDescription, privacy: .public)")
-            }
-            await finishWithStartupError(error)
+            // A producer requests retirement and returns; it never joins itself.
+            retireLiveTranscription(run, error: error)
         }
-    }
-
-    func finishWithStartupError(_ error: Error) async {
-        if Self.shouldLog(.error) {
-            Self.logger.error("Finishing due to startup error: \(error.localizedDescription, privacy: .public)")
-        }
-        prepareForStop()
-        await cleanup(cancelRecognizer: true)
-        await finishStream(error: error)
-    }
-
-    func finishFromRecognizerTask(error: Error?) async {
-        if let error {
-            if Self.shouldLog(.error) {
-                Self.logger.error(
-                    "Finishing from recognizer with error: \(error.localizedDescription, privacy: .public)"
-                )
-            }
-        } else {
-            if Self.shouldLog(.notice) {
-                Self.logger.notice("Finishing from recognizer without error")
-            }
-        }
-        prepareForStop()
-        await cleanup(cancelRecognizer: false)
-        await finishStream(error: error)
-    }
-
-    func cleanup(cancelRecognizer: Bool) async {
-        if let run = fileTranscription {
-            await retireFileTranscription(run, error: nil)?.value
-            return
-        }
-        await cleanupPipelineResources(cancelRecognizer: cancelRecognizer)
     }
 
     func cleanupPipelineResources(cancelRecognizer: Bool, publishIdle: Bool = true) async {
@@ -245,9 +202,10 @@ extension SpeechSession {
 
     // MARK: - Helper Methods
 
-    func setupAudioSession() async throws {
+    func setupAudioSession(liveRun: LiveTranscriptionRun? = nil) async throws {
 #if os(iOS)
         try await MainActor.run {
+            if let liveRun { try requireCurrentLiveTranscription(liveRun) }
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setCategory(
                 audioConfig.category,
@@ -259,6 +217,7 @@ extension SpeechSession {
         }
 #endif
 #if os(iOS) || os(macOS)
+        if let liveRun { try requireCurrentLiveTranscription(liveRun) }
         publishCurrentAudioInputInfo()
 #endif
     }
@@ -283,57 +242,4 @@ extension SpeechSession {
     private func deactivateAudioSessionIfNeeded() {}
 #endif
 
-    private func createSpeechRecognizerTask(
-        transcriber: SpeechTranscriber,
-        streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation
-    ) -> Task<Void, Never> {
-        createRecognizerTask(
-            label: "Recognizer task",
-            results: transcriber.results,
-            streamContinuation: streamContinuation
-        )
-    }
-
-    private func createDictationRecognizerTask(
-        transcriber: DictationTranscriber,
-        streamContinuation: AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation
-    ) -> Task<Void, Never> {
-        createRecognizerTask(
-            label: "Dictation recognizer task",
-            results: transcriber.results,
-            streamContinuation: streamContinuation
-        )
-    }
-
-    private func createRecognizerTask<Sequence: AsyncSequence>(
-        label: String,
-        results: Sequence,
-        streamContinuation: AsyncThrowingStream<Sequence.Element, Error>.Continuation
-    ) -> Task<Void, Never>
-    where Sequence: Sendable, Sequence.Element: Sendable {
-        Task<Void, Never> { [weak self] in
-            guard let self else { return }
-
-            do {
-                for try await result in results {
-                    streamContinuation.yield(result)
-                }
-                if Self.shouldLog(.notice) {
-                    Self.logger.notice("\(label, privacy: .public) completed without error")
-                }
-                await self.finishFromRecognizerTask(error: nil)
-            } catch is CancellationError {
-                if Self.shouldLog(.debug) {
-                    Self.logger.debug("\(label, privacy: .public) cancelled")
-                }
-            } catch {
-                if Self.shouldLog(.error) {
-                    Self.logger.error(
-                        "\(label, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
-                    )
-                }
-                await self.finishFromRecognizerTask(error: error)
-            }
-        }
-    }
 }

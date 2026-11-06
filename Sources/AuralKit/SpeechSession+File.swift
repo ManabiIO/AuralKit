@@ -71,7 +71,7 @@ public extension SpeechSession {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
         guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, streamingMode == .inactive else {
+              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
@@ -168,43 +168,57 @@ private extension SpeechSession {
             let ingest = fileTranscriptionHooks?.ingest
             run.ingestionTask = Task<Void, Never> { [weak self] in
                 guard let self else { return }
-
-                do {
-                    try self.requireCurrentFileTranscription(run)
-                    let completed: Bool
-                    if let ingest {
-                        completed = try await ingest()
-                    } else {
-                        completed = try await self.feedAudioFile(validation, progressHandler: handler)
-                    }
-                    try self.requireCurrentFileTranscription(run)
-                    guard completed else {
-                        // Cancellation was checked above. An input that ended
-                        // before its declared length is an incomplete read;
-                        // don't leave analysis open or report partial success.
-                        throw SpeechSessionError.audioFileReadFailed(CocoaError(
-                            .fileReadUnknown,
-                            userInfo: [NSLocalizedDescriptionKey: "Audio input ended before all declared frames were read."]
-                        ))
-                    }
-                    handler?(1.0)
-                    try await self.finalizeFileInput(run)
-                } catch is CancellationError {
-                    // A finalizer may fail with CancellationError even when
-                    // public stop did not initiate cancellation.
-                    if self.fileTranscription === run, !run.retired {
-                        self.retireFileTranscription(run, error: CancellationError())
-                    }
-                } catch {
-                    self.retireFileTranscription(run, error: error)
-                }
+                await self.ingestFileInput(
+                    run, validation: validation, progressHandler: handler, ingest: ingest
+                )
             }
         } catch is CancellationError {
-            retireFileTranscription(run, error: nil)
+            // A cancelled setup operation can fail independently of public stop.
+            // An existing retirement keeps its original terminal outcome.
+            retireFileTranscription(run, error: CancellationError())
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("File transcription pipeline failed: \(error.localizedDescription, privacy: .public)")
             }
+            retireFileTranscription(run, error: error)
+        }
+    }
+
+    func ingestFileInput(
+        _ run: FileTranscriptionRun,
+        validation: (file: AVAudioFile, totalFrames: AVAudioFramePosition),
+        progressHandler: (@Sendable (Double) -> Void)?,
+        ingest: (@Sendable () async throws -> Bool)?
+    ) async {
+        do {
+            try requireCurrentFileTranscription(run)
+            let completed: Bool
+            if let ingest {
+                completed = try await ingest()
+            } else {
+                completed = try await feedAudioFile(validation, progressHandler: progressHandler)
+            }
+            try requireCurrentFileTranscription(run)
+            guard completed else {
+                // Cancellation was checked above. An input that ended
+                // before its declared length is an incomplete read;
+                // don't leave analysis open or report partial success.
+                throw SpeechSessionError.audioFileReadFailed(CocoaError(
+                    .fileReadUnknown,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Audio input ended before all declared frames were read."
+                    ]
+                ))
+            }
+            progressHandler?(1.0)
+            try await finalizeFileInput(run)
+        } catch is CancellationError {
+            // A finalizer may fail with CancellationError even when
+            // public stop did not initiate cancellation.
+            if fileTranscription === run, !run.retired {
+                retireFileTranscription(run, error: CancellationError())
+            }
+        } catch {
             retireFileTranscription(run, error: error)
         }
     }
@@ -313,8 +327,9 @@ private extension SpeechSession {
         while processedFrames < totalFrames {
             if Task.isCancelled { break }
 
-            let framesRemaining = AVAudioFrameCount(totalFrames - processedFrames)
-            let framesToRead = min(frameCapacity, framesRemaining)
+            let framesToRead = AudioFileReadSize.next(
+                remaining: totalFrames - processedFrames, capacity: frameCapacity
+            )
 
             buffer.frameLength = framesToRead
 
