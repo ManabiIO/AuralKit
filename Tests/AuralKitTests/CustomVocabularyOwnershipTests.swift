@@ -73,14 +73,9 @@ struct CustomVocabularyOwnershipTests {
                 active ? fixture.session.status == .transcribing : fixture.authorizationEntered
             }
             #expect(fixture.session.status == (active ? .transcribing : .preparing))
-            await fixture.expectIdleRejection(fixture.descriptor("blocked"))
-            await fixture.expectIdleRejection(nil)
-            do {
-                _ = try await fixture.session.startTranscribing(customVocabulary: fixture.descriptor("blocked"))
-                Issue.record("Expected customVocabularyRequiresIdleSession")
-            } catch SpeechSessionError.customVocabularyRequiresIdleSession {
-                // The async wrapper preserves the configuration API's error.
-            } catch { Issue.record("Unexpected error: \(error)") }
+            try await fixture.expectIdleRejection(fixture.descriptor("blocked"))
+            try await fixture.expectIdleRejection(nil)
+            try await fixture.expectStartupIdleRejection()
             #expect(await fixture.compiler.callCount == 0)
         }
     }
@@ -307,13 +302,34 @@ private final class VocabularyFixture {
         }
     }
 
-    func expectIdleRejection(_ vocabulary: SpeechSession.CustomVocabulary?) async {
-        do {
-            try await session.configureCustomVocabulary(vocabulary)
-            Issue.record("Expected customVocabularyRequiresIdleSession")
-        } catch SpeechSessionError.customVocabularyRequiresIdleSession {
-            // The admitted stream retains its configuration.
-        } catch { Issue.record("Unexpected error: \(error)") }
+    func expectIdleRejection(_ vocabulary: SpeechSession.CustomVocabulary?) async throws {
+        var completed = false
+        let operation = task {
+            do {
+                try await self.session.configureCustomVocabulary(vocabulary)
+                Issue.record("Expected customVocabularyRequiresIdleSession")
+            } catch SpeechSessionError.customVocabularyRequiresIdleSession {
+                // The admitted stream retains its configuration.
+            } catch { Issue.record("Unexpected error: \(error)") }
+            completed = true
+        }
+        try await waitUntil { completed }
+        await operation.value
+    }
+
+    func expectStartupIdleRejection() async throws {
+        var completed = false
+        let operation = task {
+            do {
+                _ = try await self.session.startTranscribing(customVocabulary: self.descriptor("blocked"))
+                Issue.record("Expected customVocabularyRequiresIdleSession")
+            } catch SpeechSessionError.customVocabularyRequiresIdleSession {
+                // The async wrapper preserves the configuration API's error.
+            } catch { Issue.record("Unexpected error: \(error)") }
+            completed = true
+        }
+        try await waitUntil { completed }
+        await operation.value
     }
 
     func waitForCompilation(_ identifier: String) async throws {
