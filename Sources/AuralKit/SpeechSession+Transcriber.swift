@@ -203,7 +203,8 @@ extension SpeechSession {
         }
     }
 
-    func processAudioBuffer(_ buffer: SendablePCMBuffer) async throws {
+    func processAudioBuffer(_ buffer: SendablePCMBuffer, liveRun: LiveTranscriptionRun? = nil) async throws {
+        if let liveRun { try requireCurrentLiveTranscription(liveRun) }
         guard let inputBuilder, let analyzerFormat else {
             throw SpeechSessionError.invalidAudioDataType
         }
@@ -212,6 +213,7 @@ extension SpeechSession {
             from: buffer,
             analyzerFormat: analyzerFormat
         )
+        if let liveRun { try requireCurrentLiveTranscription(liveRun) }
         inputBuilder.yield(input)
     }
 

@@ -90,6 +90,8 @@ public final class SpeechSession {
     // Stream state management
     var continuation: TranscriptionContinuation?
     var recognizerTask: Task<Void, Never>?
+    var liveTranscription: LiveTranscriptionRun?
+    var liveTranscriptionHooks: LiveTranscriptionHooks?
     var fileTranscription: FileTranscriptionRun?
     var fileTranscriptionHooks: FileTranscriptionHooks?
     var streamingMode: StreamingMode = .inactive
@@ -280,23 +282,27 @@ public final class SpeechSession {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
         guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, streamingMode == .inactive else {
+              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
-        newContinuation.onTermination = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.fileTranscription == nil else { return }
-                await self.cleanup(cancelRecognizer: true)
+        let run = LiveTranscriptionRun()
+        liveTranscription = run
+        newContinuation.onTermination = { [weak self, weak run] _ in
+            Task { @MainActor [weak self, weak run] in
+                guard let self, let run else { return }
+                self.retireLiveTranscription(run, error: nil)
             }
         }
 
         setStatus(.preparing)
         continuation = .speech(newContinuation)
-        Task { @MainActor [weak self] in
+        run.setupTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.startSpeechPipeline(with: newContinuation, contextualStrings: contextualStrings)
+            await self.startSpeechPipeline(
+                run: run, with: newContinuation, contextualStrings: contextualStrings
+            )
         }
         return stream
     }
@@ -329,17 +335,21 @@ public final class SpeechSession {
     ///
     /// Safe to call even if `startTranscribing()` has not been invoked or the stream has already
     /// completed; the method simply waits for cleanup and returns.
-    /// For file transcription, also waits for setup, file ingestion and result
+    /// For live transcription, waits for setup, admitted audio processing and result
+    /// delivery to exit. For file transcription, also waits for setup, file ingestion and result
     /// delivery to exit before returning. The caller may then release its audio
     /// file lease or remove its request-owned workspace.
     public func stopTranscribing() async {
+        if let run = liveTranscription {
+            await retireLiveTranscription(run, error: nil)?.value
+            return
+        }
         if let run = fileTranscription {
             await retireFileTranscription(run, error: nil)?.value
             return
         }
-        prepareForStop()
-        await cleanup(cancelRecognizer: true)
-        await finishStream(error: nil)
+        // Every accepted transcription owns a run before setup can suspend.
+        // An idle stop must not start unowned cleanup that can overlap a new run.
     }
 
     /// Pause capture without tearing down the analyzer pipeline.
@@ -355,14 +365,14 @@ public final class SpeechSession {
     ///
     /// - Throws: `SpeechSessionError` if audio streaming cannot restart.
     public func resumeTranscribing() async throws {
-        guard status == .paused else { return }
+        guard status == .paused, let run = liveTranscription else { return }
         do {
+            try requireCurrentLiveTranscription(run)
             try startAudioStreaming()
             setStatus(.transcribing)
         } catch {
             prepareForStop()
-            await cleanup(cancelRecognizer: true)
-            await finishStream(error: error)
+            await retireLiveTranscription(run, error: error)?.value
             throw error
         }
     }

@@ -79,26 +79,28 @@ extension SpeechSession {
         let (stream, newContinuation) = AsyncThrowingStream<DictationTranscriber.Result, Error>.makeStream()
 
         guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, streamingMode == .inactive else {
+              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
-        newContinuation.onTermination = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, self.fileTranscription == nil else { return }
-                await self.cleanup(cancelRecognizer: true)
+        let run = LiveTranscriptionRun()
+        liveTranscription = run
+        newContinuation.onTermination = { [weak self, weak run] _ in
+            Task { @MainActor [weak self, weak run] in
+                guard let self, let run else { return }
+                self.retireLiveTranscription(run, error: nil)
             }
         }
 
         setStatus(.preparing)
         continuation = .dictation(newContinuation)
-
-        Task { @MainActor [weak self] in
+        run.setupTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.startDictationPipeline(with: newContinuation, contextualStrings: contextualStrings)
+            await self.startDictationPipeline(
+                run: run, with: newContinuation, contextualStrings: contextualStrings
+            )
         }
-
         return stream
     }
 

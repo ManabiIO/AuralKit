@@ -71,7 +71,7 @@ public extension SpeechSession {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
         guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, streamingMode == .inactive else {
+              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
