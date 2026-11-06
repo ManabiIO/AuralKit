@@ -1,7 +1,11 @@
 import Testing
 import Speech
 @testable import AuralKit
+#if canImport(ScreenCaptureKit)
+import ScreenCaptureKit
+#endif
 
+@available(iOS 26.0, macOS 26.0, *)
 @Suite("SpeechSession State")
 struct SpeechSessionStateTests {
 
@@ -11,6 +15,27 @@ struct SpeechSessionStateTests {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         #expect(await session.modelDownloadProgress == nil)
+    }
+
+    @Test("Input provider preference can force legacy pipeline")
+    @MainActor
+    func inputProviderPreferenceCanForceLegacyPipeline() {
+        let session = SpeechSession(inputProviderPreference: .legacy)
+
+        #expect(session.inputProviderPreference == .legacy)
+    }
+
+    @Test("Analyzer configuration round trips")
+    @MainActor
+    func analyzerConfigurationRoundTrips() {
+        let configuration = SpeechSession.AnalyzerConfiguration(
+            priority: .background,
+            modelRetention: .processLifetime,
+            preparesAnalyzerBeforeStart: false
+        )
+        let session = SpeechSession(analyzerConfiguration: configuration)
+
+        #expect(session.analyzerConfiguration == configuration)
     }
 
     @Test("Stop transcribing without session is a no-op")
@@ -360,3 +385,15 @@ private actor SpeechSessionLoggingLock {
         try await body()
     }
 }
+
+#if canImport(ScreenCaptureKit)
+@Suite("SpeechSession Screen Capture")
+struct SpeechSessionScreenCaptureTests {
+    @Test("Screen capture options expose audio defaults")
+    func screenCaptureOptionsDefaults() {
+        let options = SpeechSession.ScreenCaptureTranscriptionOptions()
+
+        #expect(options.excludesCurrentProcessAudio == true)
+    }
+}
+#endif

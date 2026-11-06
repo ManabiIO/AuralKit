@@ -8,6 +8,8 @@ import OSLog
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 final class FileTranscriptionRun {
+    var generation = 0
+    var usesNativeFileAnalyzer = false
     var setupTask: Task<Void, Never>?
     var ingestionTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
@@ -110,10 +112,11 @@ extension SpeechSession {
             guard self.fileTranscription === run else { return }
             // Finalization ends the result sequence before joining its reader;
             // do not assume an arbitrary result iterator wakes on cancellation.
-            await self.cleanupPipelineResources(cancelRecognizer: true, publishIdle: false)
+            await self.cleanup(cancelRecognizer: true, generation: run.generation, publishIdle: false)
             await run.recognizerTask?.value
+            self.fileTranscriptionHooks = nil
             self.setStatus(.idle)
-            await self.finishStream(error: error)
+            await self.finishStream(error: error, generation: run.generation)
             self.fileTranscription = nil
             run.setupTask = nil
             run.ingestionTask = nil

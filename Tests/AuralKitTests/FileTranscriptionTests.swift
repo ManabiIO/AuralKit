@@ -17,10 +17,16 @@ struct FileTranscriptionTests {
             let consumer = fixture.consume()
             try await fixture.waitUntil { authorization.entered }
             let run = try #require(fixture.session.fileTranscription)
-            for stream in [
+            var rejected = [
                 fixture.session.streamTranscription(from: fixture.audioURL),
                 fixture.session.startTranscribing()
-            ] {
+            ]
+#if canImport(ScreenCaptureKit)
+            if #available(iOS 27.0, macOS 26.0, *) {
+                rejected.append(fixture.session.startTranscribingScreenCapture())
+            }
+#endif
+            for stream in rejected {
                 await #expect(throws: SpeechSessionError.self) {
                     for try await _ in stream {}
                 }
