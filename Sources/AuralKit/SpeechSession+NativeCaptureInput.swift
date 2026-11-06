@@ -2,6 +2,7 @@ import Foundation
 @preconcurrency import AVFoundation
 import Speech
 
+@available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
     var shouldUseNativeCaptureInputProvider: Bool {
 #if swift(>=6.4)

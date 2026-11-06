@@ -150,6 +150,7 @@ extension SpeechSession {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
     func pauseScreenCaptureStreamingIfNeeded() async {
@@ -415,6 +416,7 @@ public extension SpeechSession {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
     func pauseScreenCaptureStreamingIfNeeded() async {}
