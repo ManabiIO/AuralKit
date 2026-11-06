@@ -211,6 +211,69 @@ struct LiveTranscriptionTests {
     }
 }
 
+extension LiveTranscriptionTests {
+    @Test("Stop rejects a late format before setup publishes", arguments: [false, true], [false, true])
+    @MainActor
+    func stopRejectsLateFormat(dictation: Bool, returnsNil: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFixture { fixture in
+            let gate = fixture.gate()
+            let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+            var rejected = false
+            fixture.installReadyPipeline()
+            fixture.session.liveTranscriptionHooks?.preparePipeline = { _, _ in
+                do {
+                    try await fixture.session.startAnalyzer(modules: [], selectFormat: { _ in
+                        await gate.wait()
+                        return returnsNil ? nil : format
+                    })
+                    Issue.record("Retired setup was admitted")
+                } catch {
+                    rejected = error is CancellationError
+                    // Inspect before retirement clears fields: late setup must never publish them.
+                    #expect(fixture.session.analyzerFormat == nil)
+                    #expect(fixture.session.inputSequence == nil)
+                    #expect(fixture.session.inputBuilder == nil)
+                    throw error
+                }
+            }
+            fixture.start(dictation: dictation)
+            try await fixture.waitUntil { gate.entered }
+            let run = try #require(fixture.session.liveTranscription)
+            let admitOldSetup = fixture.session.captureAnalyzerSetupAdmission()
+            var stopped = false
+            let stop = fixture.task { await fixture.session.stopTranscribing(); stopped = true }
+            try await fixture.waitUntil { run.retired }
+            #expect(!stopped)
+            #expect(throws: CancellationError.self) { try admitOldSetup() }
+            gate.open()
+            await stop.value
+            #expect(rejected)
+            #expect(fixture.starts == 0)
+            fixture.installReadyPipeline()
+            fixture.start(dictation: dictation)
+            try await fixture.waitUntil { fixture.session.status == .transcribing }
+            #expect(fixture.starts == 1)
+            #expect(throws: CancellationError.self) { try admitOldSetup() }
+        }
+    }
+
+    @Test("Current format selection retains normal validation", arguments: [false, true])
+    @MainActor
+    func currentFormatSelection(returnsNil: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let session = SpeechSession()
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        await #expect(throws: SpeechSessionError.self) {
+            try await session.startAnalyzer(modules: [], selectFormat: { _ in returnsNil ? nil : format })
+        }
+        #expect((session.analyzerFormat == nil) == returnsNil)
+        #expect((session.inputSequence == nil) == returnsNil)
+        #expect((session.inputBuilder == nil) == returnsNil)
+        _ = session.detachTranscriberState()
+    }
+}
+
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 private final class LiveGate {

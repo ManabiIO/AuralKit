@@ -3,9 +3,11 @@ import AVFoundation
 import Speech
 
 // SpeechDetector gained native SpeechModule and Sendable conformances in Xcode 26.2.
-// This extension is required for Xcode 26.0/26.1 and causes a harmless warning on 26.2+.
+// Keep this shim for Xcode 26.0/26.1 while avoiding duplicate conformances in newer SDKs.
+#if compiler(<6.3)
 @available(iOS 26.0, macOS 26.0, *)
 extension SpeechDetector: @retroactive SpeechModule, @unchecked @retroactive Sendable {}
+#endif
 
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
@@ -14,8 +16,11 @@ extension SpeechSession {
     // MARK: - Transcriber Setup and Cleanup
 
     func setUpSpeechTranscriber(
-        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
+        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
+        startAnalyzerImmediately: Bool = true
     ) async throws -> SpeechTranscriber {
+        let admitSetup = captureAnalyzerSetupAdmission()
+        try admitSetup()
         if Self.shouldLog(.notice) {
             Self.logger.notice("Setting up transcriber")
         }
@@ -23,15 +28,22 @@ extension SpeechSession {
         let transcriber = try createSpeechTranscriber()
         let modules = configureModules(transcriber: transcriber)
         try await ensureModels(modules: modules)
+        try admitSetup()
         try await configureAnalyzerContext(contextualStrings: contextualStrings)
-        try await startAnalyzer(modules: modules)
+        try admitSetup()
+        if startAnalyzerImmediately {
+            try await startAnalyzer(modules: modules, admitSetup: admitSetup)
+        }
 
         return transcriber
     }
 
     func setUpDictationTranscriber(
-        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
+        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
+        startAnalyzerImmediately: Bool = true
     ) async throws -> DictationTranscriber {
+        let admitSetup = captureAnalyzerSetupAdmission()
+        try admitSetup()
         if Self.shouldLog(.notice) {
             Self.logger.notice("Setting up dictation transcriber")
         }
@@ -39,8 +51,12 @@ extension SpeechSession {
         let transcriber = try createDictationTranscriber()
         let modules = configureModules(transcriber: transcriber)
         try await ensureModels(modules: modules)
+        try admitSetup()
         try await configureAnalyzerContext(contextualStrings: contextualStrings)
-        try await startAnalyzer(modules: modules)
+        try admitSetup()
+        if startAnalyzerImmediately {
+            try await startAnalyzer(modules: modules, admitSetup: admitSetup)
+        }
 
         return transcriber
     }
@@ -116,7 +132,16 @@ extension SpeechSession {
 
         modules.append(transcriber)
 
+#if swift(>=6.4)
+        if #available(iOS 27.0, macOS 27.0, *) {
+            analyzer = SpeechAnalyzer(modules: modules, options: analyzerConfiguration.nativeOptions)
+        } else {
+            analyzer = SpeechAnalyzer(modules: modules)
+        }
+#else
         analyzer = SpeechAnalyzer(modules: modules)
+#endif
+        activeModules = modules
         if Self.shouldLog(.debug) {
             Self.logger.debug("Analyzer instantiated with \(modules.count, privacy: .public) module(s)")
         }
@@ -171,8 +196,35 @@ extension SpeechSession {
         }
     }
 
-    private func startAnalyzer(modules: [any SpeechModule]) async throws {
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules) else {
+    /// Capture the owning runs before the first suspension. Retirement keeps these
+    /// runs installed until setup joins, but retired setup must not publish or start.
+    func captureAnalyzerSetupAdmission() -> @MainActor () throws -> Void {
+        let liveRun = liveTranscription
+        let fileRun = fileTranscription
+        return { [self] in
+            try Task.checkCancellation()
+            guard liveTranscription === liveRun, fileTranscription === fileRun,
+                  liveRun?.retired != true, fileRun?.retired != true else {
+                throw CancellationError()
+            }
+        }
+    }
+
+    func startAnalyzer(
+        modules: [any SpeechModule],
+        admitSetup: (@MainActor () throws -> Void)? = nil,
+        selectFormat: (@MainActor ([any SpeechModule]) async -> AVAudioFormat?)? = nil
+    ) async throws {
+        let admitSetup = admitSetup ?? captureAnalyzerSetupAdmission()
+        try admitSetup()
+        let selectedFormat: AVAudioFormat?
+        if let selectFormat {
+            selectedFormat = await selectFormat(modules)
+        } else {
+            selectedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules)
+        }
+        try admitSetup()
+        guard let format = selectedFormat else {
             throw SpeechSessionError.invalidAudioDataType
         }
         analyzerFormat = format
@@ -193,14 +245,16 @@ extension SpeechSession {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
 
+        try await prepareAnalyzerForStartIfNeeded(in: format)
+        try admitSetup()
+
         try await analyzer.start(inputSequence: inputSequence)
+        try admitSetup()
         if Self.shouldLog(.info) {
             Self.logger.info("Analyzer started")
         }
 
-        if voiceActivationConfiguration != nil {
-            startSpeechDetectorMonitoring()
-        }
+        startSpeechDetectorMonitoringIfNeeded()
     }
 
     func processAudioBuffer(_ buffer: SendablePCMBuffer, liveRun: LiveTranscriptionRun? = nil) async throws {
@@ -219,20 +273,22 @@ extension SpeechSession {
         inputBuilder.yield(input)
     }
 
-    func stopTranscriberAndCleanup() async {
-        inputBuilder?.finish()
+    /// State captured by `detachTranscriberState()` for asynchronous finalization.
+    struct DetachedTranscriberState {
+        let inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
+        let analyzer: SpeechAnalyzer?
+    }
+
+    /// Synchronously clear all transcriber-related session state and return the pieces that
+    /// still need asynchronous finalization.
+    ///
+    /// Clearing everything in one synchronous step means concurrent teardowns and subsequent
+    /// session starts never observe a half-torn-down pipeline.
+    func detachTranscriberState() -> DetachedTranscriberState {
         if Self.shouldLog(.debug) {
             Self.logger.debug("Stopping transcriber and cleaning up")
         }
-
-        do {
-            try await analyzer?.finalizeAndFinishThroughEndOfInput()
-        } catch {
-            // Finalization failed, but we still need to clean up resources
-            // Log for debugging but don't propagate since stop() is best-effort cleanup
-        }
-
-        await modelManager.releaseLocales()
+        let detached = DetachedTranscriberState(inputBuilder: inputBuilder, analyzer: analyzer)
 
         tearDownSpeechDetectorStream()
         speechDetector = nil
@@ -241,8 +297,25 @@ extension SpeechSession {
         inputSequence = nil
         analyzerFormat = nil
         analyzer = nil
+        activeModules = nil
         transcriber = nil
         dictationTranscriber = nil
+
+        return detached
+    }
+
+    /// Finish the detached analyzer input and finalize the detached analyzer.
+    ///
+    /// Operates only on the captured references, never on live session state, so it is safe to
+    /// run even after a newer session has started.
+    func finalizeDetachedTranscriberState(_ detached: DetachedTranscriberState) async {
+        detached.inputBuilder?.finish()
+        do {
+            try await detached.analyzer?.finalizeAndFinishThroughEndOfInput()
+        } catch {
+            // Finalization failed, but we still need to clean up resources
+            // Log for debugging but don't propagate since stop() is best-effort cleanup
+        }
         if Self.shouldLog(.debug) {
             Self.logger.debug("Transcriber cleanup complete")
         }

@@ -80,6 +80,11 @@ extension SpeechSession {
         }
     }
 
+    func startSpeechDetectorMonitoringIfNeeded() {
+        guard voiceActivationConfiguration != nil else { return }
+        startSpeechDetectorMonitoring()
+    }
+
     func handleSpeechDetectorResult(_ result: SpeechDetector.Result) {
         isSpeechDetected = result.speechDetected
         speechDetectorResultsContinuation?.yield(result)
