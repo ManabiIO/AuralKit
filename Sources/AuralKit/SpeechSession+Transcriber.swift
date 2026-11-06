@@ -209,11 +209,13 @@ extension SpeechSession {
             throw SpeechSessionError.invalidAudioDataType
         }
 
-        let input = try await audioProcessingActor.makeAnalyzerInput(
+        let converted = try await audioProcessingActor.convertBuffer(
             from: buffer,
             analyzerFormat: analyzerFormat
         )
         if let liveRun { try requireCurrentLiveTranscription(liveRun) }
+        // Keep Speech wrapping on the consuming actor, after revalidating the run.
+        let input = AnalyzerInput(buffer: converted.buffer)
         inputBuilder.yield(input)
     }
 

@@ -36,6 +36,8 @@ extension SpeechSession {
         let reportResults: Bool
     }
 
+    /// Owns PCM storage across actor hops. Producers copy reusable capture/file
+    /// buffers before wrapping; all holders must treat the buffer as immutable.
     struct SendablePCMBuffer: @unchecked Sendable {
         let buffer: AVAudioPCMBuffer
     }
