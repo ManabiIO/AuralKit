@@ -75,6 +75,12 @@ struct CustomVocabularyOwnershipTests {
             #expect(fixture.session.status == (active ? .transcribing : .preparing))
             await fixture.expectIdleRejection(fixture.descriptor("blocked"))
             await fixture.expectIdleRejection(nil)
+            do {
+                _ = try await fixture.session.startTranscribing(customVocabulary: fixture.descriptor("blocked"))
+                Issue.record("Expected customVocabularyRequiresIdleSession")
+            } catch SpeechSessionError.customVocabularyRequiresIdleSession {
+                // The async wrapper preserves the configuration API's error.
+            } catch { Issue.record("Unexpected error: \(error)") }
             #expect(await fixture.compiler.callCount == 0)
         }
     }
@@ -112,17 +118,22 @@ struct CustomVocabularyOwnershipTests {
             let run = try #require(fixture.session.liveTranscription)
             #expect(fixture.session.status == .preparing)
             var stopped = false
-            if cancelCaller { startup.cancel() }
-            let stop = fixture.task {
-                await fixture.session.stopTranscribing()
-                stopped = true
+            let stop: Task<Void, Never>?
+            if cancelCaller {
+                startup.cancel()
+                stop = nil
+            } else {
+                stop = fixture.task {
+                    await fixture.session.stopTranscribing()
+                    stopped = true
+                }
             }
             try await fixture.waitUntil { run.retired }
             #expect(!stopped)
             #expect(fixture.starts == 0)
             await fixture.compiler.release("stopped")
             await startup.value
-            await stop.value
+            await stop?.value
             #expect(fixture.errors.count == 1)
             #expect(fixture.errors.first is CancellationError)
             #expect(fixture.session.liveTranscription == nil)
@@ -142,6 +153,47 @@ struct CustomVocabularyOwnershipTests {
         }
     }
 
+    @Test("An ordinary compiler failure settles admission before immediate retry")
+    @MainActor
+    func compilerFailureAllowsImmediateRetry() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFixture { fixture in
+            fixture.authorizeOpen = true
+            let operation = fixture.task {
+                do {
+                    _ = try await fixture.session.startTranscribing(
+                        customVocabulary: fixture.descriptor("failed")
+                    )
+                    Issue.record("Expected compiler failure")
+                } catch {
+                    fixture.errors.append(error)
+                    #expect(error as? VocabularyCompilationTestError == .failed)
+                    #expect(fixture.session.liveTranscription == nil)
+                    #expect(fixture.session.continuation == nil)
+                    #expect(fixture.session.status == .idle)
+                    // Call the public wrapper directly from catch, without yielding to cleanup.
+                    do {
+                        let stream = try await fixture.session.startTranscribing(
+                            customVocabulary: fixture.descriptor("retry")
+                        )
+                        for try await _ in stream {}
+                    } catch { fixture.errors.append(error) }
+                }
+            }
+            try await fixture.waitForCompilation("failed")
+            await fixture.compiler.release("failed")
+            try await fixture.waitForCompilation("retry")
+            #expect(fixture.starts == 0)
+            await fixture.compiler.release("retry")
+            try await fixture.waitUntil { fixture.session.status == .transcribing }
+            #expect(fixture.starts == 1)
+            #expect(fixture.errors.count == 1)
+            await fixture.session.stopTranscribing()
+            await operation.value
+            #expect(fixture.errors.count == 1)
+        }
+    }
+
     @MainActor
     @available(iOS 26.0, macOS 26.0, *)
     private func withFixture(_ operation: @MainActor (VocabularyFixture) async throws -> Void) async throws {
@@ -150,6 +202,10 @@ struct CustomVocabularyOwnershipTests {
         catch { await fixture.cleanup(); throw error }
         await fixture.cleanup()
     }
+}
+
+private enum VocabularyCompilationTestError: Error, Equatable {
+    case failed
 }
 
 @available(iOS 26.0, macOS 26.0, *)
@@ -168,6 +224,7 @@ private actor GatedVocabularyCompiler: CustomVocabularyCompiling {
         if !releasedAll {
             await withCheckedContinuation { pending[descriptor.identifier] = $0 }
         }
+        if descriptor.identifier == "failed" { throw VocabularyCompilationTestError.failed }
         return CustomVocabularyCompilation(
             configuration: SFSpeechLanguageModel.Configuration(
                 languageModel: output.appendingPathComponent("model"),

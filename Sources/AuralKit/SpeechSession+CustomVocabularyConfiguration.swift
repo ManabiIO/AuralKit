@@ -149,7 +149,7 @@ extension SpeechSession {
         customVocabulary: CustomVocabulary,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async throws -> AsyncThrowingStream<DictationTranscriber.Result, Error> {
-        try Task.checkCancellation()
+        try requireVocabularyAdmission(nil)
         let (stream, newContinuation, run) = try admitDictationTranscription()
         let preparation = Task { @MainActor in
             try await self.configureCustomVocabulary(customVocabulary, liveRun: run)
@@ -166,16 +166,22 @@ extension SpeechSession {
                 self.retireLiveTranscription(run, error: error)
             }
         }
-        return try await withTaskCancellationHandler {
-            try await preparation.value
-            try Task.checkCancellation()
-            return stream
-        } onCancel: {
-            preparation.cancel()
-            Task { @MainActor [weak self, weak run] in
-                guard let self, let run else { return }
-                self.retireLiveTranscription(run, error: nil)
+        do {
+            return try await withTaskCancellationHandler {
+                try await preparation.value
+                try Task.checkCancellation()
+                return stream
+            } onCancel: {
+                preparation.cancel()
+                Task { @MainActor [weak self, weak run] in
+                    guard let self, let run else { return }
+                    self.retireLiveTranscription(run, error: nil)
+                }
             }
+        } catch {
+            // The caller is outside setup, so it can join retirement before retrying.
+            await retireLiveTranscription(run, error: error)?.value
+            throw error
         }
     }
 
