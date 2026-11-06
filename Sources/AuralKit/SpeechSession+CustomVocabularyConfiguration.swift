@@ -67,10 +67,24 @@ extension SpeechSession {
             try await compiler.compile(descriptor: vocabulary)
         }.value
 
-        // Detached compilers may finish after cancellation, clearing or replacement.
-        // Only the admitted request may publish or remove the previous assets.
-        try requireVocabularyAdmission(liveRun)
-        guard customVocabularyRequestID == requestID else { throw CancellationError() }
+        // A successful compiler result transfers a private directory to this
+        // request. Rejected results must be retired too, after compilation joins.
+        do {
+            try requireVocabularyAdmission(liveRun)
+            guard customVocabularyRequestID == requestID else { throw CancellationError() }
+        } catch {
+            if compilation.outputDirectory != customVocabularyOutputDirectory {
+                do {
+                    try FileManager.default.removeItem(at: compilation.outputDirectory)
+                } catch {
+                    logCustomVocabularyError(
+                        "Failed to delete retired vocabulary directory.",
+                        path: compilation.outputDirectory.path, error: error
+                    )
+                }
+            }
+            throw error
+        }
 
         if let previousDirectory = customVocabularyOutputDirectory,
            previousDirectory != compilation.outputDirectory {

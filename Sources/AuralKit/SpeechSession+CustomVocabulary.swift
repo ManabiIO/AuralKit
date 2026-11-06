@@ -153,6 +153,8 @@ struct CustomVocabularyCompilation: Sendable {
 
 @available(iOS 26.0, macOS 26.0, *)
 protocol CustomVocabularyCompiling: Sendable {
+    // Success transfers a private output directory to the caller. On failure,
+    // the compiler must remove any outputs it allocated before throwing.
     func compile(descriptor: SpeechSession.CustomVocabulary) async throws -> CustomVocabularyCompilation
 }
 
@@ -167,16 +169,34 @@ final class CustomVocabularyCompiler: CustomVocabularyCompiling, @unchecked Send
     }
 
     private let fileManager: FileManager
+    // Replaces only the Apple export/prepare work; allocation and cleanup always
+    // run through the production filesystem path.
+    private let prepareModel: (@Sendable (
+        SpeechSession.CustomVocabulary, URL, SFSpeechLanguageModel.Configuration
+    ) async throws -> Void)?
 
-    init(fileManager: FileManager = .default) {
+    init(
+        fileManager: FileManager = .default,
+        prepareModel: (@Sendable (
+            SpeechSession.CustomVocabulary, URL, SFSpeechLanguageModel.Configuration
+        ) async throws -> Void)? = nil
+    ) {
         self.fileManager = fileManager
+        self.prepareModel = prepareModel
     }
 
     func compile(descriptor: SpeechSession.CustomVocabulary) async throws -> CustomVocabularyCompilation {
         let cacheKey = try descriptor.stableCacheKey()
         let paths = try preparePaths(for: cacheKey)
+        var transferred = false
+        defer {
+            if !transferred { removeOutputDirectory(paths.outputDirectory) }
+        }
         let configuration = makeConfiguration(for: descriptor, paths: paths)
+        try Task.checkCancellation()
         try await exportModelData(descriptor, with: paths, configuration: configuration)
+        try Task.checkCancellation()
+        transferred = true
 
         return CustomVocabularyCompilation(
             configuration: configuration,
@@ -193,21 +213,15 @@ final class CustomVocabularyCompiler: CustomVocabularyCompiling, @unchecked Send
 
         let outputDirectory = baseDirectory
             .appendingPathComponent("com.auralkit.vocabulary", isDirectory: true)
-            .appendingPathComponent(cacheKey, isDirectory: true)
+            .appendingPathComponent("\(cacheKey)-\(UUID().uuidString)", isDirectory: true)
 
-        if !fileManager.fileExists(atPath: outputDirectory.path) {
-            try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        }
+        // The descriptor key is cache identity, not filesystem ownership. Every
+        // invocation owns a private directory, including concurrent equal descriptors.
+        try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let languageModelURL = outputDirectory.appendingPathComponent("languageModel.bin")
         let vocabularyURL = outputDirectory.appendingPathComponent("vocabulary.bin")
-        // Use UUID to ensure unique temp file per compilation invocation, preventing races
-        let uniqueID = UUID().uuidString
-        let assetURL = fileManager.temporaryDirectory
-            .appendingPathComponent("auralkit-custom-vocabulary-\(uniqueID).bin")
-
-        // Clean up any existing temp file before creating new one
-        try? fileManager.removeItem(at: assetURL)
+        let assetURL = outputDirectory.appendingPathComponent("source.bin")
 
         return CompilationPaths(
             outputDirectory: outputDirectory,
@@ -240,8 +254,6 @@ final class CustomVocabularyCompiler: CustomVocabularyCompiling, @unchecked Send
         with paths: CompilationPaths,
         configuration: SFSpeechLanguageModel.Configuration
     ) async throws {
-        let modelData = descriptor.makeModelData()
-
         defer {
             // Best-effort cleanup of temp asset file
             do {
@@ -259,16 +271,28 @@ final class CustomVocabularyCompiler: CustomVocabularyCompiling, @unchecked Send
         }
 
         do {
-            // Offload heavy I/O work to background to avoid blocking main actor
-            try await Task.detached(priority: .userInitiated) {
+            if let prepareModel {
+                try await prepareModel(descriptor, paths.assetURL, configuration)
+            } else {
+                let modelData = descriptor.makeModelData()
                 try await modelData.export(to: paths.assetURL)
                 try await SFSpeechLanguageModel.prepareCustomLanguageModel(
                     for: paths.assetURL,
                     configuration: configuration
                 )
-            }.value
+            }
         } catch {
             throw SpeechSessionError.customVocabularyCompilationFailed(error)
+        }
+    }
+
+    private func removeOutputDirectory(_ directory: URL) {
+        do {
+            try fileManager.removeItem(at: directory)
+        } catch {
+            logCustomVocabularyError(
+                "Failed to delete incomplete vocabulary directory.", path: directory.path, error: error
+            )
         }
     }
 }

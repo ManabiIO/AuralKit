@@ -70,32 +70,25 @@ struct SpeechSessionStateTests {
             let next = await iterator.next()
             return (initial, next)
         }
-        defer {
-            nextA.cancel()
-            nextB.cancel()
-        }
+        try await withOwnedTasks([nextA, nextB]) {
+            try await awaitResult {
+                var iterator = readyA.stream.makeAsyncIterator()
+                _ = await iterator.next()
+            }
+            try await awaitResult {
+                var iterator = readyB.stream.makeAsyncIterator()
+                _ = await iterator.next()
+            }
 
-        try await awaitResult {
-            var iterator = readyA.stream.makeAsyncIterator()
-            _ = await iterator.next()
-        }
-        try await awaitResult {
-            var iterator = readyB.stream.makeAsyncIterator()
-            _ = await iterator.next()
-        }
+            session.setStatus(.preparing)
 
-        session.setStatus(.preparing)
-
-        let valueA = try await awaitResult {
-            await nextA.value
+            let valueA = try await awaitResult(of: nextA)
+            let valueB = try await awaitResult(of: nextB)
+            #expect(valueA.0 == .some(.idle))
+            #expect(valueA.1 == .some(.preparing))
+            #expect(valueB.0 == .some(.idle))
+            #expect(valueB.1 == .some(.preparing))
         }
-        let valueB = try await awaitResult {
-            await nextB.value
-        }
-        #expect(valueA.0 == .some(.idle))
-        #expect(valueA.1 == .some(.preparing))
-        #expect(valueB.0 == .some(.idle))
-        #expect(valueB.1 == .some(.preparing))
     }
 }
 
@@ -155,24 +148,17 @@ struct SpeechSessionAudioInputStreamTests {
             var iteratorB = streamB.makeAsyncIterator()
             return await iteratorB.next()
         }
-        defer {
-            valueA.cancel()
-            valueB.cancel()
-        }
+        try await withOwnedTasks([valueA, valueB]) {
+            await Task.yield()
+            session.broadcastAudioInputInfo(nil)
 
-        await Task.yield()
-        session.broadcastAudioInputInfo(nil)
-
-        let firstA = try await awaitResult {
-            await valueA.value
+            let firstA = try await awaitResult(of: valueA)
+            let firstB = try await awaitResult(of: valueB)
+            let flattenedA = firstA?.flatMap { $0 }
+            let flattenedB = firstB?.flatMap { $0 }
+            #expect(flattenedA == nil)
+            #expect(flattenedB == nil)
         }
-        let firstB = try await awaitResult {
-            await valueB.value
-        }
-        let flattenedA = firstA?.flatMap { $0 }
-        let flattenedB = firstB?.flatMap { $0 }
-        #expect(flattenedA == nil)
-        #expect(flattenedB == nil)
     }
 }
 
