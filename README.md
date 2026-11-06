@@ -22,7 +22,7 @@ AuralKit is a simple, lightweight Swift wrapper for speech-to-text transcription
 - Device capability helper to inspect available transcribers and locales
 - Xcode 27-ready file transcription path that can use Speech's native analyzer file input when built with Swift 6.4+
 - Xcode 27-ready live capture and analyzer preheating configuration with Xcode 26 fallbacks
-- ScreenCaptureKit-backed transcription for selected content audio on iOS 27+ and macOS 14+
+- ScreenCaptureKit-backed transcription for selected content audio on iOS 27+ and macOS 26+
 - SwiftUI-friendly API that mirrors Apple's sample project design
 
 ## Table of Contents
@@ -529,7 +529,7 @@ Add to your `Info.plist`:
 - This Reader-compatible fork retains an iOS 15 / macOS 15 package linking floor; guard speech API use with availability checks. The demo remains an Xcode app targeting supported speech platforms.
 - Swift 6.2+
 - Microphone and speech recognition permissions
-- Screen capture transcription requires iOS 27+ or macOS 14+ ScreenCaptureKit support and `NSScreenCaptureUsageDescription`
+- Screen capture transcription requires iOS 27+ or macOS 26+ ScreenCaptureKit support and `NSScreenCaptureUsageDescription`
 
 ## Contributing
 
