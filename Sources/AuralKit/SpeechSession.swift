@@ -73,7 +73,9 @@ public final class SpeechSession {
     var analyzerFormat: AVAudioFormat?
     var nativeCaptureSession: AVCaptureSession?
     var nativeCaptureAnalysisTask: Task<Void, Never>?
-    var screenCaptureInputProvider: AnyObject?
+    var screenCapturePipelineHooks: ScreenCapturePipelineHooks?
+    var screenCaptureAnalysisFinalizer: (@MainActor () async -> Void)?
+    var screenCaptureInputProvider: (any ScreenCaptureInput)?
     var voiceActivationConfiguration: VoiceActivationConfiguration?
     var customVocabularyDescriptor: CustomVocabulary?
     var customVocabularyConfiguration: SFSpeechLanguageModel.Configuration?
@@ -98,6 +100,7 @@ public final class SpeechSession {
     // Stream state management
     var continuation: TranscriptionContinuation?
     var recognizerTask: Task<Void, Never>?
+    var cleanupTask: (generation: Int, task: Task<Void, Never>)?
     var pipelineTask: Task<Void, Never>?
     var fileIngestionTask: Task<Void, Never>?
     var streamingMode: StreamingMode = .inactive
@@ -363,11 +366,15 @@ public final class SpeechSession {
     /// screen capture). Calls during file transcription or in any other state are ignored.
     public func pauseTranscribing() async {
         guard status == .transcribing, isPausableStreamingMode else { return }
+        let generation = sessionGeneration
         if streamingMode == .screenCapture {
             await pauseScreenCaptureStreamingIfNeeded()
         } else {
             stopAudioStreaming()
         }
+        // A paused capture call can finish after stop has published idle, even in the
+        // same generation; it must not publish paused over that terminal status.
+        guard generation == sessionGeneration, status == .transcribing, isPausableStreamingMode else { return }
         setStatus(.paused)
     }
 
@@ -379,12 +386,19 @@ public final class SpeechSession {
         let generation = sessionGeneration
         do {
             if streamingMode == .screenCapture {
-                try await resumeScreenCaptureStreamingIfNeeded()
+                let outcome = try await resumeScreenCaptureStreamingIfNeeded()
+                guard outcome.isCurrent() else { return }
+                if let error = outcome.error { throw error }
             } else {
                 try startAudioStreaming()
             }
+            // A late start may have compensated for stop while this caller was suspended.
+            // Generation alone is insufficient until a successor actually begins.
+            guard generation == sessionGeneration, status == .paused, isPausableStreamingMode else { return }
             setStatus(.transcribing)
         } catch {
+            // A late failure belongs to the detached provider, not a successor session.
+            guard generation == sessionGeneration, status == .paused, isPausableStreamingMode else { throw error }
             prepareForStop()
             await cleanup(cancelRecognizer: true, generation: generation)
             await finishStream(error: error, generation: generation)
