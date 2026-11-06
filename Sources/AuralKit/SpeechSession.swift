@@ -38,6 +38,7 @@ public final class SpeechSession {
 
     let modelManager = ModelManager()
     var customVocabularyCompiler: any CustomVocabularyCompiling
+    var customVocabularyRequestID: UUID?
     let audioProcessingActor = AudioProcessingActor()
 
     lazy var audioEngine = AVAudioEngine()
