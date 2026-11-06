@@ -47,6 +47,8 @@ public final class SpeechSession {
     let preset: SpeechTranscriber.Preset?
     let reportingOptions: Set<SpeechTranscriber.ReportingOption>
     let attributeOptions: Set<SpeechTranscriber.ResultAttributeOption>
+    let inputProviderPreference: InputProviderPreference
+    let analyzerConfiguration: AnalyzerConfiguration
 
     var statusContinuations: [UUID: AsyncStream<Status>.Continuation] = [:]
 
@@ -66,9 +68,13 @@ public final class SpeechSession {
     var dictationTranscriber: DictationTranscriber?
     var speechDetector: SpeechDetector?
     var analyzer: SpeechAnalyzer?
+    var activeModules: [any SpeechModule]?
     var inputSequence: AsyncStream<AnalyzerInput>?
     var inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
     var analyzerFormat: AVAudioFormat?
+    var nativeCaptureSession: AVCaptureSession?
+    var nativeCaptureAnalysisTask: Task<Void, Never>?
+    var screenCaptureInputProvider: AnyObject?
     var voiceActivationConfiguration: VoiceActivationConfiguration?
     var customVocabularyDescriptor: CustomVocabulary?
     var customVocabularyConfiguration: SFSpeechLanguageModel.Configuration?
@@ -90,8 +96,13 @@ public final class SpeechSession {
     // Stream state management
     var continuation: TranscriptionContinuation?
     var recognizerTask: Task<Void, Never>?
+    var pipelineTask: Task<Void, Never>?
     var fileIngestionTask: Task<Void, Never>?
+    var fileTranscription: FileTranscriptionRun?
+    var fileTranscriptionHooks: FileTranscriptionHooks?
     var streamingMode: StreamingMode = .inactive
+    /// Incremented for every accepted start so stale termination handlers can be ignored.
+    var sessionGeneration: Int = 0
 
     // Notification Handling
     var routeChangeObserver: NSObjectProtocol?
@@ -117,12 +128,16 @@ public final class SpeechSession {
         locale: Locale = .current,
         preset: SpeechTranscriber.Preset? = nil,
         reportingOptions: Set<SpeechTranscriber.ReportingOption> = defaultReportingOptions,
-        attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions
+        attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
+        inputProviderPreference: InputProviderPreference = .automatic,
+        analyzerConfiguration: AnalyzerConfiguration = .default
     ) {
         self.locale = locale
         self.preset = preset
         self.reportingOptions = reportingOptions
         self.attributeOptions = attributeOptions
+        self.inputProviderPreference = inputProviderPreference
+        self.analyzerConfiguration = analyzerConfiguration
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS)
         self.audioConfig = AudioSessionConfiguration.default
@@ -150,12 +165,16 @@ public final class SpeechSession {
         preset: SpeechTranscriber.Preset? = nil,
         reportingOptions: Set<SpeechTranscriber.ReportingOption> = defaultReportingOptions,
         attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
-        audioConfig: AudioSessionConfiguration = .default
+        audioConfig: AudioSessionConfiguration = .default,
+        inputProviderPreference: InputProviderPreference = .automatic,
+        analyzerConfiguration: AnalyzerConfiguration = .default
     ) {
         self.locale = locale
         self.preset = preset
         self.reportingOptions = reportingOptions
         self.attributeOptions = attributeOptions
+        self.inputProviderPreference = inputProviderPreference
+        self.analyzerConfiguration = analyzerConfiguration
         self.audioConfig = audioConfig
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS) || os(macOS)
@@ -278,23 +297,27 @@ public final class SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        newContinuation.onTermination = { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.cleanup(cancelRecognizer: true)
-            }
-        }
-
-        guard continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
+        guard fileTranscription == nil, continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
+        let generation = beginStreamGeneration()
+        newContinuation.onTermination = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.handleStreamTermination(generation: generation)
+            }
+        }
+
         setStatus(.preparing)
         continuation = .speech(newContinuation)
-        Task { @MainActor [weak self] in
+        pipelineTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.startSpeechPipeline(with: newContinuation, contextualStrings: contextualStrings)
+            await self.startSpeechPipeline(
+                with: newContinuation,
+                contextualStrings: contextualStrings,
+                generation: generation
+            )
         }
         return stream
     }
@@ -328,17 +351,27 @@ public final class SpeechSession {
     /// Safe to call even if `startTranscribing()` has not been invoked or the stream has already
     /// completed; the method simply waits for cleanup and returns.
     public func stopTranscribing() async {
+        if let run = fileTranscription {
+            await retireFileTranscription(run, error: nil)?.value
+            return
+        }
+        let generation = sessionGeneration
         prepareForStop()
-        await cleanup(cancelRecognizer: true)
-        await finishStream(error: nil)
+        await cleanup(cancelRecognizer: true, generation: generation)
+        await finishStream(error: nil, generation: generation)
     }
 
     /// Pause capture without tearing down the analyzer pipeline.
     ///
-    /// Safe to call only when the session is actively transcribing. Additional calls are ignored.
+    /// Safe to call only when the session is actively transcribing live audio (microphone or
+    /// screen capture). Calls during file transcription or in any other state are ignored.
     public func pauseTranscribing() async {
-        guard status == .transcribing else { return }
-        stopAudioStreaming()
+        guard status == .transcribing, isPausableStreamingMode else { return }
+        if streamingMode == .screenCapture {
+            await pauseScreenCaptureStreamingIfNeeded()
+        } else {
+            stopAudioStreaming()
+        }
         setStatus(.paused)
     }
 
@@ -346,14 +379,19 @@ public final class SpeechSession {
     ///
     /// - Throws: `SpeechSessionError` if audio streaming cannot restart.
     public func resumeTranscribing() async throws {
-        guard status == .paused else { return }
+        guard status == .paused, isPausableStreamingMode else { return }
+        let generation = sessionGeneration
         do {
-            try startAudioStreaming()
+            if streamingMode == .screenCapture {
+                try await resumeScreenCaptureStreamingIfNeeded()
+            } else {
+                try startAudioStreaming()
+            }
             setStatus(.transcribing)
         } catch {
             prepareForStop()
-            await cleanup(cancelRecognizer: true)
-            await finishStream(error: error)
+            await cleanup(cancelRecognizer: true, generation: generation)
+            await finishStream(error: error, generation: generation)
             throw error
         }
     }
