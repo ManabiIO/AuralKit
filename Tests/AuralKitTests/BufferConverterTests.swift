@@ -2,8 +2,7 @@ import Testing
 import AVFoundation
 @testable import AuralKit
 
-@Suite("Audio buffer conversion")
-struct BufferConverterTests {
+extension BufferConverterTests {
     @Test("Input format changes behave like a fresh audio converter")
     func converterRecreatesForChangedInputFormat() throws {
         func input(rate: Double) throws -> AVAudioPCMBuffer {

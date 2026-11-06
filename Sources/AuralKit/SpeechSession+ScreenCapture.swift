@@ -397,6 +397,7 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
     }
 }
 #else
+@available(iOS 26.0, macOS 26.0, *)
 public extension SpeechSession {
     /// Placeholder options used when ScreenCaptureKit is unavailable to the current build target.
     struct ScreenCaptureTranscriptionOptions {

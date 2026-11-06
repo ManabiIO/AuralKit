@@ -3,7 +3,6 @@ import AVFoundation
 import Speech
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("SpeechSession Lifecycle")
 struct SpeechSessionLifecycleTests {
 
@@ -12,6 +11,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Rejected concurrent start leaves the active session untouched")
     @MainActor
     func rejectedConcurrentStartLeavesActiveSessionUntouched() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         // Simulate an active live session.
@@ -39,6 +39,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Stream termination releases the stored continuation")
     @MainActor
     func streamTerminationReleasesContinuation() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         let (_, continuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
@@ -56,6 +57,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Stale stream termination is ignored")
     @MainActor
     func staleStreamTerminationIsIgnored() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         let staleGeneration = session.beginStreamGeneration()
@@ -83,6 +85,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Stale cleanup is ignored")
     @MainActor
     func staleCleanupIsIgnored() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         let staleGeneration = session.beginStreamGeneration()
@@ -106,6 +109,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Stale finishStream leaves the current stream open")
     @MainActor
     func staleFinishStreamLeavesCurrentStreamOpen() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         let staleGeneration = session.beginStreamGeneration()
@@ -128,6 +132,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Pause is refused during file transcription")
     @MainActor
     func pauseIsRefusedDuringFileTranscription() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         session.streamingMode = .filePlayback
@@ -145,6 +150,7 @@ struct SpeechSessionLifecycleTests {
     @Test("Resume is refused during file transcription")
     @MainActor
     func resumeIsRefusedDuringFileTranscription() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
 
         session.streamingMode = .filePlayback
@@ -206,11 +212,11 @@ struct BufferConverterTests {
     }
 }
 
-@available(iOS 26.0, macOS 26.0, *)
 extension SpeechSessionLifecycleTests {
     @Test("Stale cancelled setup preserves a replacement task", arguments: [false, true])
     @MainActor
     func staleCancelledSetupPreservesReplacementTask(dictation: Bool) async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         session.sessionGeneration = 2
         let replacement = Task<Void, Never> { }

@@ -5,7 +5,6 @@ import Speech
 import ScreenCaptureKit
 #endif
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("SpeechSession State")
 struct SpeechSessionStateTests {
 
@@ -20,6 +19,7 @@ struct SpeechSessionStateTests {
     @Test("Input provider preference can force legacy pipeline")
     @MainActor
     func inputProviderPreferenceCanForceLegacyPipeline() {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession(inputProviderPreference: .legacy)
 
         #expect(session.inputProviderPreference == .legacy)
@@ -28,6 +28,7 @@ struct SpeechSessionStateTests {
     @Test("Analyzer configuration round trips")
     @MainActor
     func analyzerConfigurationRoundTrips() {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let configuration = SpeechSession.AnalyzerConfiguration(
             priority: .background,
             modelRetention: .processLifetime,
@@ -339,7 +340,6 @@ struct SpeechSessionCustomVocabularyTests {
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-@available(iOS 26.0, macOS 26.0, *)
 actor MockCustomVocabularyCompiler: CustomVocabularyCompiling {
 
     private let baseDirectory: URL
@@ -391,6 +391,7 @@ private actor SpeechSessionLoggingLock {
 struct SpeechSessionScreenCaptureTests {
     @Test("Screen capture options expose audio defaults")
     func screenCaptureOptionsDefaults() {
+        guard #available(iOS 27.0, macOS 26.0, *) else { return }
         let options = SpeechSession.ScreenCaptureTranscriptionOptions()
 
         #expect(options.excludesCurrentProcessAudio == true)
