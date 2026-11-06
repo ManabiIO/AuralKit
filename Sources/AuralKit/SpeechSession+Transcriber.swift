@@ -19,6 +19,8 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
         startAnalyzerImmediately: Bool = true
     ) async throws -> SpeechTranscriber {
+        let admitSetup = captureAnalyzerSetupAdmission()
+        try admitSetup()
         if Self.shouldLog(.notice) {
             Self.logger.notice("Setting up transcriber")
         }
@@ -26,11 +28,11 @@ extension SpeechSession {
         let transcriber = try createSpeechTranscriber()
         let modules = configureModules(transcriber: transcriber)
         try await ensureModels(modules: modules)
-        try Task.checkCancellation()
+        try admitSetup()
         try await configureAnalyzerContext(contextualStrings: contextualStrings)
-        try Task.checkCancellation()
+        try admitSetup()
         if startAnalyzerImmediately {
-            try await startAnalyzer(modules: modules)
+            try await startAnalyzer(modules: modules, admitSetup: admitSetup)
         }
 
         return transcriber
@@ -40,6 +42,8 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
         startAnalyzerImmediately: Bool = true
     ) async throws -> DictationTranscriber {
+        let admitSetup = captureAnalyzerSetupAdmission()
+        try admitSetup()
         if Self.shouldLog(.notice) {
             Self.logger.notice("Setting up dictation transcriber")
         }
@@ -47,11 +51,11 @@ extension SpeechSession {
         let transcriber = try createDictationTranscriber()
         let modules = configureModules(transcriber: transcriber)
         try await ensureModels(modules: modules)
-        try Task.checkCancellation()
+        try admitSetup()
         try await configureAnalyzerContext(contextualStrings: contextualStrings)
-        try Task.checkCancellation()
+        try admitSetup()
         if startAnalyzerImmediately {
-            try await startAnalyzer(modules: modules)
+            try await startAnalyzer(modules: modules, admitSetup: admitSetup)
         }
 
         return transcriber
@@ -192,8 +196,35 @@ extension SpeechSession {
         }
     }
 
-    private func startAnalyzer(modules: [any SpeechModule]) async throws {
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules) else {
+    /// Capture the owning runs before the first suspension. Retirement keeps these
+    /// runs installed until setup joins, but retired setup must not publish or start.
+    func captureAnalyzerSetupAdmission() -> @MainActor () throws -> Void {
+        let liveRun = liveTranscription
+        let fileRun = fileTranscription
+        return { [self] in
+            try Task.checkCancellation()
+            guard liveTranscription === liveRun, fileTranscription === fileRun,
+                  liveRun?.retired != true, fileRun?.retired != true else {
+                throw CancellationError()
+            }
+        }
+    }
+
+    func startAnalyzer(
+        modules: [any SpeechModule],
+        admitSetup: (@MainActor () throws -> Void)? = nil,
+        selectFormat: (@MainActor ([any SpeechModule]) async -> AVAudioFormat?)? = nil
+    ) async throws {
+        let admitSetup = admitSetup ?? captureAnalyzerSetupAdmission()
+        try admitSetup()
+        let selectedFormat: AVAudioFormat?
+        if let selectFormat {
+            selectedFormat = await selectFormat(modules)
+        } else {
+            selectedFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: modules)
+        }
+        try admitSetup()
+        guard let format = selectedFormat else {
             throw SpeechSessionError.invalidAudioDataType
         }
         analyzerFormat = format
@@ -215,8 +246,10 @@ extension SpeechSession {
         }
 
         try await prepareAnalyzerForStartIfNeeded(in: format)
+        try admitSetup()
 
         try await analyzer.start(inputSequence: inputSequence)
+        try admitSetup()
         if Self.shouldLog(.info) {
             Self.logger.info("Analyzer started")
         }
