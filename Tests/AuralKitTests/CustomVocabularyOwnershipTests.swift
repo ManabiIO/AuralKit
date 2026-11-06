@@ -241,6 +241,92 @@ struct CustomVocabularyOwnershipTests {
         try await first.configureCustomVocabulary(nil)
     }
 
+    @Test("Releasing idle sessions retires only their own production output")
+    @MainActor
+    func idleSessionReleaseRetiresPrivateOutput() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let compiler = CustomVocabularyCompiler(prepareModel: { _, asset, _ in
+            let directory = asset.deletingLastPathComponent()
+            try Data("model".utf8).write(to: directory.appendingPathComponent("languageModel.bin"))
+            try Data("vocabulary".utf8).write(to: directory.appendingPathComponent("vocabulary.bin"))
+            try Data("source".utf8).write(to: asset)
+        })
+        var first: SpeechSession? = SpeechSession(locale: Locale(identifier: "en_US"))
+        var second: SpeechSession? = SpeechSession(locale: Locale(identifier: "en_US"))
+        weak var firstOwner = first
+        weak var secondOwner = second
+        defer { first = nil; second = nil }
+        first?.customVocabularyCompiler = compiler
+        second?.customVocabularyCompiler = compiler
+        let descriptor = SpeechSession.CustomVocabulary(
+            locale: Locale(identifier: "en_US"), identifier: "idle-release-ownership", version: "1"
+        )
+        try await first?.configureCustomVocabulary(descriptor)
+        try await second?.configureCustomVocabulary(descriptor)
+        let firstDirectory = try #require(first?.customVocabularyOutputDirectory)
+        let secondDirectory = try #require(second?.customVocabularyOutputDirectory)
+        let cacheKey = try #require(second?.customVocabularyCacheKey)
+        #expect(firstDirectory != secondDirectory)
+        #expect(first?.customVocabularyCacheKey == cacheKey)
+
+        // No explicit clear, stop or direct filesystem cleanup retires either owner.
+        first = nil
+        #expect(firstOwner == nil)
+        #expect(!FileManager.default.fileExists(atPath: firstDirectory.path))
+        try await second?.configureCustomVocabulary(descriptor)
+        #expect(second?.customVocabularyOutputDirectory == secondDirectory)
+        #expect(second?.customVocabularyCacheKey == cacheKey)
+        #expect(second?.customVocabularyConfiguration != nil)
+        let model = secondDirectory.appendingPathComponent("languageModel.bin")
+        let vocabulary = secondDirectory.appendingPathComponent("vocabulary.bin")
+        let source = secondDirectory.appendingPathComponent("source.bin")
+        #expect(try Data(contentsOf: model) == Data("model".utf8))
+        #expect(try Data(contentsOf: vocabulary) == Data("vocabulary".utf8))
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+
+        second = nil
+        #expect(secondOwner == nil)
+        #expect(!FileManager.default.fileExists(atPath: secondDirectory.path))
+    }
+
+    @Test("A queued live result reader retains vocabulary through retirement")
+    @MainActor
+    func queuedReaderRetainsArtifactOwner() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        var session: SpeechSession? = SpeechSession(locale: Locale(identifier: "en_US"))
+        session?.customVocabularyCompiler = CustomVocabularyCompiler(prepareModel: { _, asset, _ in
+            try Data("model".utf8).write(
+                to: asset.deletingLastPathComponent().appendingPathComponent("languageModel.bin")
+            )
+        })
+        try await session?.configureCustomVocabulary(.init(
+            locale: Locale(identifier: "en_US"), identifier: "queued-reader-ownership", version: "1"
+        ))
+        let directory = try #require(session?.customVocabularyOutputDirectory)
+        let run = LiveTranscriptionRun()
+        let results = AsyncStream<Int>.makeStream()
+        let forwarded = AsyncThrowingStream<Int, Error>.makeStream()
+        // Exercise the production reader and terminal join without native Speech work.
+        session?.liveTranscription = run
+        let reader = try #require(session?.makeLiveRecognizerTask(
+            run: run, results: results.stream, streamContinuation: forwarded.continuation
+        ))
+        run.recognizerTask = reader
+        weak var owner = session
+        session = nil
+        // No suspension since reader creation: it must own the session even
+        // before its first actor turn, not only after upgrading a weak capture.
+        #expect(owner != nil)
+        let model = directory.appendingPathComponent("languageModel.bin")
+        #expect(FileManager.default.fileExists(atPath: model.path))
+        results.continuation.finish()
+        await reader.value
+        await run.terminalTask?.value
+        #expect(owner == nil)
+        #expect(!FileManager.default.fileExists(atPath: directory.path))
+        forwarded.continuation.finish()
+    }
+
     @Test("Production compiler cleans failed and rejected output", arguments: ["failed", "clear", "cancelled", "replacement"])
     @MainActor
     func productionRejectedOutputIsRemoved(reason: String) async throws {

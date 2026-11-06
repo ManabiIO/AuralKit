@@ -183,6 +183,7 @@ public final class SpeechSession {
         }
 #endif
         finishStatusStreams()
+        clearCustomVocabularyArtifacts(removeDescriptor: true)
     }
 
     // MARK: - Public API

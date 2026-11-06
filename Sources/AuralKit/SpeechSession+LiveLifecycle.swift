@@ -39,8 +39,9 @@ extension SpeechSession {
         streamContinuation: AsyncThrowingStream<Sequence.Element, Error>.Continuation
     ) -> Task<Void, Never>
     where Sequence: Sendable, Sequence.Element: Sendable {
-        Task<Void, Never> { @MainActor [weak self] in
-            guard let self else { return }
+        // Setup may already have started the analyzer. Retain its artifact owner
+        // from task creation, including before this reader first runs.
+        Task<Void, Never> { @MainActor [self] in
             do {
                 for try await result in results {
                     try self.requireCurrentLiveTranscription(run)
