@@ -174,9 +174,12 @@ extension SpeechSession {
 #if os(iOS)
         shouldResumeAfterInterruption = false
 #endif
+        let analysisFinalizer = screenCaptureAnalysisFinalizer
+        screenCaptureAnalysisFinalizer = nil
         let detached = detachTranscriberState()
         await stopScreenCaptureStreamingIfNeeded()
         await finalizeDetachedTranscriberState(detached)
+        await analysisFinalizer?()
         // Finalization wakes native analysis before joining it. Keep model leases
         // until that task can no longer use the detached analyzer.
         await inputTask?.value

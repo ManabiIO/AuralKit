@@ -74,6 +74,8 @@ public final class SpeechSession {
     var inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
     var analyzerFormat: AVAudioFormat?
     var nativeCaptureSession: AVCaptureSession?
+    var screenCapturePipelineHooks: ScreenCapturePipelineHooks?
+    var screenCaptureAnalysisFinalizer: (@MainActor () async -> Void)?
     var screenCaptureInputProvider: (any ScreenCaptureInput)?
     var voiceActivationConfiguration: VoiceActivationConfiguration?
     var customVocabularyDescriptor: CustomVocabulary?
@@ -392,7 +394,9 @@ public final class SpeechSession {
         do {
             try requireCurrentLiveTranscription(run)
             if streamingMode == .screenCapture {
-                try await resumeScreenCaptureStreamingIfNeeded()
+                let outcome = try await resumeScreenCaptureStreamingIfNeeded()
+                guard outcome.isCurrent() else { return }
+                if let error = outcome.error { throw error }
                 try requireCurrentLiveTranscription(run)
             } else {
                 try startAudioStreaming()
