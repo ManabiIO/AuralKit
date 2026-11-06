@@ -244,3 +244,101 @@ final class FileLifecycleFixture {
         try? FileManager.default.removeItem(at: audioURL)
     }
 }
+
+extension FileTranscriptionTests {
+    @Test("independent file setup cancellation fails and permits retry", arguments: [false, true])
+    @MainActor
+    func independentFileSetupCancellationRetires(duringPreparation: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            let setup = fixture.gate()
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: {
+                    if !duringPreparation {
+                        await setup.wait()
+                        throw CancellationError()
+                    }
+                },
+                preparePipeline: { _ in
+                    if duringPreparation {
+                        await setup.wait()
+                        throw CancellationError()
+                    }
+                },
+                ingest: { Issue.record("Failed setup must not ingest audio"); return true }
+            )
+            let consumer = fixture.transcribe()
+            try await fixture.waitUntil { setup.entered }
+            let failedRun = try #require(fixture.session.fileTranscription)
+            setup.open()
+            await consumer.value
+            #expect(fixture.errors.count == 1)
+            #expect(fixture.errors.first is CancellationError)
+            #expect(fixture.session.fileTranscription == nil)
+            #expect(fixture.session.status == .idle)
+            #expect(failedRun.setupTask == nil)
+
+            let retryAuthorization = fixture.gate()
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: { await retryAuthorization.wait() },
+                preparePipeline: { _ in Issue.record("Stopped retry must not prepare analysis") }
+            )
+            let retry = fixture.transcribe()
+            try await fixture.waitUntil { retryAuthorization.entered }
+            let retryRun = try #require(fixture.session.fileTranscription)
+            #expect(retryRun !== failedRun)
+            #expect(fixture.session.retireFileTranscription(failedRun, error: CancellationError()) == nil)
+            #expect(!retryRun.retired)
+            let stop = fixture.task { await fixture.session.stopTranscribing() }
+            try await fixture.waitUntil { retryRun.retired }
+            retryAuthorization.open()
+            await stop.value
+            await retry.value
+            #expect(fixture.errors.count == 1, "Intentional retry stop adds no setup failure")
+            #expect(fixture.session.fileTranscription == nil)
+            #expect(fixture.session.status == .idle)
+        }
+    }
+
+    @Test("public stop keeps its outcome when suspended setup later throws cancellation", arguments: [false, true])
+    @MainActor
+    func publicStopOwnsLateFileSetupCancellation(duringPreparation: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            let setup = fixture.gate()
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: {
+                    if !duringPreparation {
+                        await setup.wait()
+                        throw CancellationError()
+                    }
+                },
+                preparePipeline: { _ in
+                    if duringPreparation {
+                        await setup.wait()
+                        throw CancellationError()
+                    }
+                },
+                ingest: { Issue.record("Stopped setup must not ingest audio"); return true }
+            )
+            let consumer = fixture.transcribe()
+            try await fixture.waitUntil { setup.entered }
+            let run = try #require(fixture.session.fileTranscription)
+            var stopCompleted = false
+            let stop = fixture.task {
+                await fixture.session.stopTranscribing()
+                stopCompleted = true
+            }
+            try await fixture.waitUntil { run.retired }
+            #expect(!stopCompleted)
+            #expect(fixture.session.fileTranscription === run)
+            setup.open()
+            await stop.value
+            await consumer.value
+            #expect(stopCompleted)
+            #expect(fixture.errors.isEmpty)
+            #expect(run.setupTask == nil)
+            fixture.expectSuccessfulRetirement(run)
+        }
+    }
+}

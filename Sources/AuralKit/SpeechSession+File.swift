@@ -173,7 +173,9 @@ private extension SpeechSession {
                 )
             }
         } catch is CancellationError {
-            retireFileTranscription(run, error: nil)
+            // A cancelled setup operation can fail independently of public stop.
+            // An existing retirement keeps its original terminal outcome.
+            retireFileTranscription(run, error: CancellationError())
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("File transcription pipeline failed: \(error.localizedDescription, privacy: .public)")
@@ -325,8 +327,9 @@ private extension SpeechSession {
         while processedFrames < totalFrames {
             if Task.isCancelled { break }
 
-            let framesRemaining = AVAudioFrameCount(totalFrames - processedFrames)
-            let framesToRead = min(frameCapacity, framesRemaining)
+            let framesToRead = AVAudioFrameCount(min(
+                AVAudioFramePosition(frameCapacity), totalFrames - processedFrames
+            ))
 
             buffer.frameLength = framesToRead
 
