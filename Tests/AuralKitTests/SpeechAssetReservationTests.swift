@@ -269,7 +269,7 @@ struct SpeechAssetReservationTests {
     func downloadFailure() async throws {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFixture { fixture in
-            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"))
+            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
             let manager = fixture.manager { _ in throw AssetReservationFixture.ProbeError.download }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             if case .success = await operation.result { Issue.record("Download failure was ignored") }
@@ -287,7 +287,7 @@ struct SpeechAssetReservationTests {
         try await withFixture { fixture in
             let gate = fixture.gate()
             await fixture.inventory.holdReserve(at: gate)
-            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"))
+            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
             let manager = fixture.manager { _ in Issue.record("Canceled acquisition started a download") }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }
@@ -307,7 +307,7 @@ struct SpeechAssetReservationTests {
         try await withFixture { fixture in
             let gate = fixture.gate()
             await fixture.inventory.holdReserve(at: gate)
-            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"))
+            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
             let manager = fixture.manager { _ in Issue.record("Retired preparation started a download") }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }
@@ -329,7 +329,7 @@ struct SpeechAssetReservationTests {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFixture { fixture in
             let gate = fixture.gate()
-            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"))
+            let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
             let manager = fixture.manager { _ in await gate.wait() }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }

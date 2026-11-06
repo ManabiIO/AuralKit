@@ -63,7 +63,7 @@ actor ModelManager {
             guard await manager.localeMatches(provider: supportedLocales, locale: locale) else {
                 throw SpeechSessionError.unsupportedLocale(locale)
             }
-        }) { manager in
+        }, install: { manager in
             if await manager.localeMatches(provider: installedLocales, locale: locale) {
                 manager.logger.notice("Locale \(locale.identifier(.bcp47)) already installed")
                 manager.currentDownloadProgress = nil
@@ -71,7 +71,7 @@ actor ModelManager {
                 manager.logger.info("Ensuring model download for locale \(locale.identifier(.bcp47))")
                 try await manager.downloadAssetsIfNeeded(for: [module])
             }
-        }
+        })
     }
 
     private func localeMatches(
