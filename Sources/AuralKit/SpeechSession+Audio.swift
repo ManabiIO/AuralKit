@@ -1,5 +1,6 @@
 import Foundation
 @preconcurrency import AVFoundation
+import Speech
 
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
@@ -14,9 +15,20 @@ extension SpeechSession {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
 
+#if swift(>=6.4)
+        if #available(iOS 27.0, macOS 27.0, *), startPreparedNativeCaptureStreaming() {
+            return
+        }
+#endif
+
         if Self.shouldLog(.debug) {
             Self.logger.debug("Starting audio streaming")
         }
+
+        guard inputBuilder != nil, analyzerFormat != nil else {
+            throw SpeechSessionError.invalidAudioDataType
+        }
+
         audioEngine.inputNode.removeTap(onBus: 0)
 
         let inputFormat = audioEngine.inputNode.outputFormat(forBus: 0)
@@ -44,6 +56,13 @@ extension SpeechSession {
 
     func stopAudioStreaming() {
         guard isAudioStreaming else { return }
+
+#if swift(>=6.4)
+        if #available(iOS 27.0, macOS 27.0, *), stopPreparedNativeCaptureStreaming() {
+            return
+        }
+#endif
+
         if Self.shouldLog(.debug) {
             Self.logger.debug("Stopping audio streaming")
         }
@@ -202,6 +221,7 @@ extension SpeechSession {
             await retireLiveTranscription(run, error: error)?.value
         }
     }
+
 #elseif os(macOS)
     func handleEngineConfigurationChange() async {
         do {
@@ -279,6 +299,19 @@ extension SpeechSession {
             Self.logger.debug("Resetting audio engine")
         }
         let wasStreaming = isAudioStreaming
+        let wasUsingNativeCapture = nativeCaptureSession != nil
+
+        if wasUsingNativeCapture {
+            guard wasStreaming else { return }
+            guard try restartNativeCaptureStreamingIfAvailable() else {
+                throw SpeechSessionError.recognitionStreamSetupFailed
+            }
+
+            if Self.shouldLog(.debug) {
+                Self.logger.debug("Native capture session reset complete")
+            }
+            return
+        }
 
         if wasStreaming {
             audioEngine.inputNode.removeTap(onBus: 0)

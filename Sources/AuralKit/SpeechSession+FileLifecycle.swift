@@ -8,6 +8,7 @@ import OSLog
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 final class FileTranscriptionRun {
+    var usesNativeFileAnalyzer = false
     var setupTask: Task<Void, Never>?
     var ingestionTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
@@ -112,6 +113,7 @@ extension SpeechSession {
             // do not assume an arbitrary result iterator wakes on cancellation.
             await self.cleanupPipelineResources(cancelRecognizer: true, publishIdle: false)
             await run.recognizerTask?.value
+            self.fileTranscriptionHooks = nil
             self.setStatus(.idle)
             await self.finishStream(error: error)
             self.fileTranscription = nil

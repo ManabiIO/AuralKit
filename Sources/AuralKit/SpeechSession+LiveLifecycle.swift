@@ -1,11 +1,12 @@
 import Foundation
 import Speech
 
-/// One microphone stream owns setup, result delivery and admitted buffer work.
+/// One live capture stream owns setup, result delivery and admitted buffer work.
 /// Producers request retirement and return; the terminal task performs the joins.
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 final class LiveTranscriptionRun {
+    var inputTask: Task<Void, Never>?
     var setupTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
     var audioTasks: [UUID: Task<Void, Never>] = [:]
@@ -86,11 +87,15 @@ extension SpeechSession {
         run.retired = true
         prepareForStop()
         stopAudioStreaming()
+        run.inputTask?.cancel()
         run.setupTask?.cancel()
         run.recognizerTask?.cancel()
         run.audioTasks.values.forEach { $0.cancel() }
         let terminal = Task { @MainActor in
+            // Dismiss pending selection before joining setup, which may be waiting on it.
+            await self.stopScreenCaptureStreamingIfNeeded()
             await run.setupTask?.value
+            run.inputTask?.cancel()
             // Setup may install a result reader after cancellation was requested.
             run.recognizerTask?.cancel()
             let detectorTask = self.speechDetectorResultsTask
@@ -99,13 +104,16 @@ extension SpeechSession {
             audioTasks.forEach { $0.cancel() }
             for task in audioTasks { await task.value }
             guard self.liveTranscription === run else { return }
-            await self.cleanupPipelineResources(cancelRecognizer: true, publishIdle: false)
+            await self.cleanupPipelineResources(
+                cancelRecognizer: true, publishIdle: false, inputTask: run.inputTask
+            )
             await run.recognizerTask?.value
             await detectorTask?.value
             guard self.liveTranscription === run else { return }
             self.setStatus(.idle)
             await self.finishStream(error: error)
             self.liveTranscription = nil
+            run.inputTask = nil
             run.setupTask = nil
             run.recognizerTask = nil
             run.audioTasks.removeAll()

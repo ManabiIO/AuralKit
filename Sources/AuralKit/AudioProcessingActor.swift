@@ -10,10 +10,9 @@ actor AudioProcessingActor {
         from buffer: SpeechSession.SendablePCMBuffer,
         analyzerFormat: AVAudioFormat
     ) throws -> SpeechSession.SendablePCMBuffer {
-        // The sample converter only keys its cache by output format. A reused
-        // session or a route change can supply a different source format while
-        // the analyzer format stays the same. Keep resampling state only while
-        // the input format is continuous, including across passthrough buffers.
+        // Keep resampling state only while the input format is continuous.
+        // Upstream's converter keys both formats, but passthrough returns before
+        // updating that cache. Reset here across passthrough transitions too.
         if inputFormat != buffer.buffer.format {
             converter = BufferConverter()
             inputFormat = buffer.buffer.format
