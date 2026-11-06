@@ -72,11 +72,11 @@ extension SpeechSession {
             compatibleWith: modules,
             priority: analyzerConfiguration.priority
         )
-        try Task.checkCancellation()
+        try checkSetupAdmission(generation: generation)
         nativeCaptureSession = provider.captureSession
 
         try await prepareAnalyzerForStartIfNeeded(in: nil)
-        try Task.checkCancellation()
+        try checkSetupAdmission(generation: generation)
 
         let analyzerInputs = provider.analyzerInputs
         nativeCaptureAnalysisTask = Task<Void, Never> { [weak self, analyzer, analyzerInputs, vocabularyArtifacts] in

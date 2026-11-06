@@ -142,28 +142,29 @@ extension SpeechSession {
                 Self.logger.notice("Starting screen capture pipeline setup")
             }
 
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             if let hooks = screenCapturePipelineHooks {
                 try await hooks.authorize()
-                try Task.checkCancellation()
+                try checkSetupAdmission(generation: generation)
                 let prepared = try await hooks.prepareAnalysis()
+                try checkSetupAdmission(generation: generation)
                 analyzerFormat = prepared.format
                 inputBuilder = prepared.inputs
                 screenCaptureAnalysisFinalizer = prepared.finalize
             } else {
                 try await ensureSpeechRecognitionAuthorization(context: "for screen capture transcription")
-                try Task.checkCancellation()
+                try checkSetupAdmission(generation: generation)
                 let transcriber = try await setUpSpeechTranscriber(contextualStrings: contextualStrings)
-                try Task.checkCancellation()
+                try checkSetupAdmission(generation: generation)
                 recognizerTask = createSpeechRecognizerTask(
                     transcriber: transcriber,
                     streamContinuation: streamContinuation,
                     generation: generation
                 )
             }
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             try await setUpScreenCaptureStreaming(options: options, generation: generation)
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
 
             streamingMode = .screenCapture
             setStatus(.transcribing)
@@ -172,14 +173,12 @@ extension SpeechSession {
                 Self.logger.info("Pipeline started (mode: screen capture)")
             }
         } catch is CancellationError {
-            pipelineTask = nil
-            await finishCancelledPipelineSetup(generation: generation)
+            await finishFailedPipelineSetup(CancellationError(), generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Screen capture pipeline failed: \(error.localizedDescription, privacy: .public)")
             }
-            pipelineTask = nil
-            await finishWithStartupError(error, generation: generation)
+            await finishFailedPipelineSetup(error, generation: generation)
         }
     }
 

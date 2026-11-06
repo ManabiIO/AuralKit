@@ -110,18 +110,18 @@ extension SpeechSession {
             if Self.shouldLog(.notice) {
                 Self.logger.notice("Starting pipeline setup")
             }
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             try await ensurePermissions()
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             try await setupAudioSession()
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
 
             let shouldUseNativeCapture = shouldUseNativeCaptureInputProvider
             let transcriber = try await setUpSpeechTranscriber(
                 contextualStrings: contextualStrings,
                 startAnalyzerImmediately: !shouldUseNativeCapture
             )
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Transcriber prepared with modules")
             }
@@ -133,10 +133,10 @@ extension SpeechSession {
             )
 
             if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
-                try Task.checkCancellation()
+                try checkSetupAdmission(generation: generation)
                 try startAudioStreaming()
             }
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
 
             streamingMode = .liveMicrophone
             setStatus(.transcribing)
@@ -145,14 +145,12 @@ extension SpeechSession {
                 Self.logger.info("Pipeline started (mode: live microphone)")
             }
         } catch is CancellationError {
-            pipelineTask = nil
-            await finishCancelledPipelineSetup(generation: generation)
+            await finishFailedPipelineSetup(CancellationError(), generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Pipeline setup failed: \(error.localizedDescription, privacy: .public)")
             }
-            pipelineTask = nil
-            await finishWithStartupError(error, generation: generation)
+            await finishFailedPipelineSetup(error, generation: generation)
         }
     }
 
@@ -167,18 +165,18 @@ extension SpeechSession {
             if Self.shouldLog(.notice) {
                 Self.logger.notice("Starting dictation pipeline setup")
             }
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             try await ensurePermissions()
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             try await setupAudioSession()
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
 
             let shouldUseNativeCapture = shouldUseNativeCaptureInputProvider
             let transcriber = try await setUpDictationTranscriber(
                 contextualStrings: contextualStrings,
                 startAnalyzerImmediately: !shouldUseNativeCapture
             )
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Dictation transcriber prepared with modules")
             }
@@ -191,10 +189,10 @@ extension SpeechSession {
             )
 
             if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
-                try Task.checkCancellation()
+                try checkSetupAdmission(generation: generation)
                 try startAudioStreaming()
             }
-            try Task.checkCancellation()
+            try checkSetupAdmission(generation: generation)
 
             streamingMode = .liveMicrophone
             setStatus(.transcribing)
@@ -203,13 +201,28 @@ extension SpeechSession {
                 Self.logger.info("Dictation pipeline started (mode: live microphone)")
             }
         } catch is CancellationError {
-            pipelineTask = nil
-            await finishCancelledPipelineSetup(generation: generation)
+            await finishFailedPipelineSetup(CancellationError(), generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Dictation pipeline setup failed: \(error.localizedDescription, privacy: .public)")
             }
-            pipelineTask = nil
+            await finishFailedPipelineSetup(error, generation: generation)
+        }
+    }
+
+    /// A nonthrowing native await may return after stop or replacement.
+    func checkSetupAdmission(generation: Int) throws {
+        try Task.checkCancellation()
+        guard generation == sessionGeneration else { throw CancellationError() }
+    }
+
+    /// Check ownership before dropping the setup handle, not only inside terminal cleanup.
+    func finishFailedPipelineSetup(_ error: Error, generation: Int) async {
+        guard generation == sessionGeneration else { return }
+        pipelineTask = nil
+        if error is CancellationError {
+            await finishCancelledPipelineSetup(generation: generation)
+        } else {
             await finishWithStartupError(error, generation: generation)
         }
     }
