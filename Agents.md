@@ -11,7 +11,9 @@ the previous `CLAUDE.md` guidance.
 ## Project Snapshot
 
 - **Name**: AuralKit (Swift Package)
-- **Platforms**: iOS 26+, macOS 26+
+- **Speech APIs**: iOS 26+, macOS 26+; native analyzer input providers require 27+.
+- **Package linking floor**: iOS 15+, macOS 15+. Guard speech API use with availability checks.
+- **Screen capture**: iOS 27+, macOS 26+, when ScreenCaptureKit is available.
 - **Primary API**: `SpeechSession` (MainActor class in `Sources/AuralKit/SpeechSession.swift`)
 - **Purpose**: Real‑time speech‑to‑text using Apple’s `SpeechTranscriber` / `SpeechAnalyzer`
 - **Demo App**: SwiftUI app in the `Aural/` directory (scheme `Aural`)

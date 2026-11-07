@@ -19,6 +19,7 @@ extension SpeechSession {
         case inactive
         case liveMicrophone
         case filePlayback
+        case screenCapture
     }
 
     enum TranscriptionResultKind: Equatable, Sendable {
@@ -29,6 +30,15 @@ extension SpeechSession {
     enum TranscriptionContinuation {
         case speech(AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation)
         case dictation(AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation)
+    }
+
+    /// Preferred source pipeline for feeding audio into `SpeechAnalyzer`.
+    public enum InputProviderPreference: Equatable, Sendable {
+        /// Use native Speech input sequence providers when the compiler and OS support them.
+        case automatic
+
+        /// Always use AuralKit's AVAudioEngine and buffer conversion pipeline.
+        case legacy
     }
 
     struct VoiceActivationConfiguration {

@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import Speech
 
+// swiftlint:disable file_length
+
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
@@ -71,13 +73,20 @@ extension SpeechSession {
 
     // MARK: - Pipeline Orchestration
 
+    var isPausableStreamingMode: Bool {
+        streamingMode == .liveMicrophone || streamingMode == .screenCapture
+    }
+
     func startSpeechPipeline(
         run: LiveTranscriptionRun,
         with streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async {
         await startLivePipeline(run: run, kind: .speech) {
-            let transcriber = try await self.setUpSpeechTranscriber(contextualStrings: contextualStrings)
+            let transcriber = try await self.setUpSpeechTranscriber(
+                contextualStrings: contextualStrings,
+                startAnalyzerImmediately: !self.shouldUseNativeCaptureInputProvider
+            )
             try self.requireCurrentLiveTranscription(run)
             return self.makeLiveRecognizerTask(
                 run: run, results: transcriber.results, streamContinuation: streamContinuation
@@ -91,7 +100,10 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async {
         await startLivePipeline(run: run, kind: .dictation) {
-            let transcriber = try await self.setUpDictationTranscriber(contextualStrings: contextualStrings)
+            let transcriber = try await self.setUpDictationTranscriber(
+                contextualStrings: contextualStrings,
+                startAnalyzerImmediately: !self.shouldUseNativeCaptureInputProvider
+            )
             try self.requireCurrentLiveTranscription(run)
             return self.makeLiveRecognizerTask(
                 run: run, results: transcriber.results, streamContinuation: streamContinuation
@@ -123,7 +135,8 @@ extension SpeechSession {
             recognizerTask = run.recognizerTask
             if let startAudio = liveTranscriptionHooks?.startAudio {
                 try startAudio()
-            } else {
+            } else if !(try await setUpNativeCaptureStreamingIfAvailable(run: run)) {
+                try requireCurrentLiveTranscription(run)
                 try startAudioStreaming()
             }
             try requireCurrentLiveTranscription(run)
@@ -136,7 +149,10 @@ extension SpeechSession {
         }
     }
 
-    func cleanupPipelineResources(cancelRecognizer: Bool, publishIdle: Bool = true) async {
+    func cleanupPipelineResources(
+        cancelRecognizer: Bool, publishIdle: Bool = true,
+        inputTask: Task<Void, Never>? = nil
+    ) async {
         if Self.shouldLog(.debug) {
             Self.logger.debug("Cleanup started (cancelRecognizer: \(cancelRecognizer, privacy: .public))")
         }
@@ -153,17 +169,31 @@ extension SpeechSession {
         streamingMode = .inactive
         activeResultKind = nil
         stopAudioStreaming()
+        tearDownNativeCaptureStreaming()
         deactivateAudioSessionIfNeeded()
 #if os(iOS)
         shouldResumeAfterInterruption = false
 #endif
-        await stopTranscriberAndCleanup()
+        let analysisFinalizer = screenCaptureAnalysisFinalizer
+        screenCaptureAnalysisFinalizer = nil
+        let detached = detachTranscriberState()
+        await stopScreenCaptureStreamingIfNeeded()
+        await finalizeDetachedTranscriberState(detached)
+        await analysisFinalizer?()
+        // Finalization wakes native analysis before joining it. Keep model leases
+        // until that task can no longer use the detached analyzer.
+        await inputTask?.value
+        await modelManager.releaseLocales()
+
         if publishIdle { setStatus(.idle) }
         if Self.shouldLog(.debug) {
             Self.logger.debug("Cleanup completed")
         }
     }
 
+    /// Finish the active consumer stream.
+    ///
+    /// Called by the owning terminal task while admission remains closed.
     func finishStream(error: Error?) async {
         guard let continuation else { return }
         self.continuation = nil
