@@ -28,8 +28,8 @@ import Speech
 /// }
 /// ```
 ///
-/// Call `stopTranscribing()` to end capture and unwind the stream. The same instance may be reused
-/// for subsequent transcription sessions.
+/// Call `finishTranscribing()` to end capture and receive final results, or `cancelTranscribing()`
+/// to discard pending work. The same instance may be reused after either operation returns.
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 public final class SpeechSession {
@@ -49,6 +49,7 @@ public final class SpeechSession {
     let attributeOptions: Set<SpeechTranscriber.ResultAttributeOption>
     let inputProviderPreference: InputProviderPreference
     let analyzerConfiguration: AnalyzerConfiguration
+    let audioSessionOwnership: AudioSessionOwnership
 
     var statusContinuations: [UUID: AsyncStream<Status>.Continuation] = [:]
 
@@ -100,6 +101,9 @@ public final class SpeechSession {
     var fileIngestionTask: Task<Void, Never>?
     var fileTranscription: FileTranscriptionRun?
     var fileTranscriptionHooks: FileTranscriptionHooks?
+    var liveTranscription: LiveTranscriptionRun?
+    var liveTranscriptionHooks: LiveTranscriptionHooks?
+    var externalAudioInput: ExternalAudioInput?
     var streamingMode: StreamingMode = .inactive
     /// Incremented for every accepted start so stale termination handlers can be ignored.
     var sessionGeneration: Int = 0
@@ -124,13 +128,15 @@ public final class SpeechSession {
     ///     Defaults to `.volatileResults` (partial results) and `.alternativeTranscriptions`.
     ///   - attributeOptions: Options controlling what metadata is included with results when no preset is provided.
     ///     Defaults to `.audioTimeRange` (timing info) and `.transcriptionConfidence`.
+    ///   - audioSessionOwnership: Use `.external` when the host manages AVAudioSession.
     public init(
         locale: Locale = .current,
         preset: SpeechTranscriber.Preset? = nil,
         reportingOptions: Set<SpeechTranscriber.ReportingOption> = defaultReportingOptions,
         attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
         inputProviderPreference: InputProviderPreference = .automatic,
-        analyzerConfiguration: AnalyzerConfiguration = .default
+        analyzerConfiguration: AnalyzerConfiguration = .default,
+        audioSessionOwnership: AudioSessionOwnership = .managed
     ) {
         self.locale = locale
         self.preset = preset
@@ -138,6 +144,7 @@ public final class SpeechSession {
         self.attributeOptions = attributeOptions
         self.inputProviderPreference = inputProviderPreference
         self.analyzerConfiguration = analyzerConfiguration
+        self.audioSessionOwnership = audioSessionOwnership
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS)
         self.audioConfig = AudioSessionConfiguration.default
@@ -160,6 +167,7 @@ public final class SpeechSession {
     ///   - attributeOptions: Options controlling what metadata is included with results when no preset is provided.
     ///     Defaults to `.audioTimeRange` (timing info) and `.transcriptionConfidence`.
     ///   - audioConfig: Audio session configuration for iOS. Controls category, mode, and options.
+    ///     Ignored when `audioSessionOwnership` is `.external`.
     public init(
         locale: Locale = .current,
         preset: SpeechTranscriber.Preset? = nil,
@@ -167,7 +175,8 @@ public final class SpeechSession {
         attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
         audioConfig: AudioSessionConfiguration = .default,
         inputProviderPreference: InputProviderPreference = .automatic,
-        analyzerConfiguration: AnalyzerConfiguration = .default
+        analyzerConfiguration: AnalyzerConfiguration = .default,
+        audioSessionOwnership: AudioSessionOwnership = .managed
     ) {
         self.locale = locale
         self.preset = preset
@@ -175,6 +184,7 @@ public final class SpeechSession {
         self.attributeOptions = attributeOptions
         self.inputProviderPreference = inputProviderPreference
         self.analyzerConfiguration = analyzerConfiguration
+        self.audioSessionOwnership = audioSessionOwnership
         self.audioConfig = audioConfig
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS) || os(macOS)
@@ -265,7 +275,7 @@ public final class SpeechSession {
     ///
     /// The returned `AsyncThrowingStream` yields `SpeechTranscriber.Result` chunks containing both text and
     /// timing metadata (`.audioTimeRange`), as well as whether the result is final or volatile (partial).
-    /// Consume the stream with `for try await` and call `stopTranscribing()` to finish early.
+    /// Consume the stream with `for try await` and call `finishTranscribing()` to finish early.
     ///
     /// - Parameter contextualStrings: Optional dictionary mapping contextual strings tags
     ///   to arrays of contextual words that help improve transcription accuracy. For example,
@@ -297,13 +307,14 @@ public final class SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        guard fileTranscription == nil, continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
-        let generation = beginStreamGeneration()
-        newContinuation.onTermination = { [weak self] _ in
+        let generation = beginLiveTranscription().generation
+        newContinuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
             Task { @MainActor [weak self] in
                 await self?.handleStreamTermination(generation: generation)
             }
@@ -346,32 +357,20 @@ public final class SpeechSession {
         return startTranscribing(contextualStrings: [.general: contextualStrings])
     }
 
-    /// Stop capturing audio and finish the current transcription stream.
-    ///
-    /// Safe to call even if `startTranscribing()` has not been invoked or the stream has already
-    /// completed; the method simply waits for cleanup and returns.
-    public func stopTranscribing() async {
-        if let run = fileTranscription {
-            await retireFileTranscription(run, error: nil)?.value
-            return
-        }
-        let generation = sessionGeneration
-        prepareForStop()
-        await cleanup(cancelRecognizer: true, generation: generation)
-        await finishStream(error: nil, generation: generation)
-    }
-
     /// Pause capture without tearing down the analyzer pipeline.
     ///
     /// Safe to call only when the session is actively transcribing live audio (microphone or
     /// screen capture). Calls during file transcription or in any other state are ignored.
     public func pauseTranscribing() async {
         guard status == .transcribing, isPausableStreamingMode else { return }
+        let generation = sessionGeneration
         if streamingMode == .screenCapture {
             await pauseScreenCaptureStreamingIfNeeded()
         } else {
             stopAudioStreaming()
         }
+        guard generation == sessionGeneration, status == .transcribing,
+              liveTranscription?.terminalTask == nil else { return }
         setStatus(.paused)
     }
 
@@ -387,11 +386,11 @@ public final class SpeechSession {
             } else {
                 try startAudioStreaming()
             }
+            guard generation == sessionGeneration, status == .paused,
+                  liveTranscription?.terminalTask == nil else { return }
             setStatus(.transcribing)
         } catch {
-            prepareForStop()
-            await cleanup(cancelRecognizer: true, generation: generation)
-            await finishStream(error: error, generation: generation)
+            await requestLiveTermination(generation: generation, gracefully: false, error: error)?.value
             throw error
         }
     }

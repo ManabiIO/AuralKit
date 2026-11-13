@@ -42,13 +42,14 @@ public extension SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        guard fileTranscription == nil, continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
-        let generation = beginStreamGeneration()
-        newContinuation.onTermination = { [weak self] _ in
+        let generation = beginLiveTranscription().generation
+        newContinuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
             Task { @MainActor [weak self] in
                 await self?.handleStreamTermination(generation: generation)
             }
@@ -115,17 +116,16 @@ extension SpeechSession {
             streamingMode = .screenCapture
             setStatus(.transcribing)
             activeResultKind = .speech
+            clearPipelineTask(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Pipeline started (mode: screen capture)")
             }
         } catch is CancellationError {
-            clearPipelineTask(generation: generation)
             await finishCancelledPipelineSetup(generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Screen capture pipeline failed: \(error.localizedDescription, privacy: .public)")
             }
-            clearPipelineTask(generation: generation)
             await finishWithStartupError(error, generation: generation)
         }
     }
@@ -196,6 +196,9 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
     private var stream: SCStream?
     private var selectionContinuation: CheckedContinuation<Void, Error>?
     private var isRunning = false
+    private var stopped = false
+    private var captureTask: Task<Void, Never>?
+    private var resumeTask: Task<Void, Error>?
     private var intentionallyStoppingStreams = Set<ObjectIdentifier>()
 
     init(
@@ -213,6 +216,7 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
 
     @MainActor
     func start() async throws {
+        guard !stopped else { throw CancellationError() }
         let picker = SCContentSharingPicker.shared
         let configuration = SCContentSharingPickerConfiguration()
         picker.configuration = configuration
@@ -236,15 +240,26 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
 
     @MainActor
     func resume() async throws {
-        guard !isRunning, let stream else {
+        guard !stopped, !isRunning, resumeTask == nil, let stream else {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
-        try await stream.startCapture()
-        isRunning = true
+        let task = Task<Void, Error> { @MainActor in
+            try await stream.startCapture()
+            guard !self.stopped else {
+                self.markStreamForIntentionalStop(stream)
+                try? await stream.stopCapture()
+                throw CancellationError()
+            }
+            self.isRunning = true
+        }
+        resumeTask = task
+        defer { resumeTask = nil }
+        try await task.value
     }
 
     @MainActor
     func stop() async {
+        stopped = true
         let picker = SCContentSharingPicker.shared
         picker.isActive = false
         picker.remove(self)
@@ -254,7 +269,13 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
             self.selectionContinuation = nil
         }
 
-        if isRunning, let stream {
+        // A picker callback can be suspended in startCapture. Join it so it
+        // cannot install or restart a capture stream after this stop returns.
+        await captureTask?.value
+        captureTask = nil
+        try? await resumeTask?.value
+
+        if let stream {
             markStreamForIntentionalStop(stream)
             try? await stream.stopCapture()
         }
@@ -269,13 +290,19 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
     ) {
         nonisolated(unsafe) let selectedFilter = filter
         Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await beginCapture(with: selectedFilter)
-                resumeSelection()
-            } catch {
-                if !resumeSelection(throwing: error) {
-                    onFailure(SpeechSessionError.screenCaptureFailed(error))
+            guard let self, !self.stopped else { return }
+            let previous = self.captureTask
+            self.captureTask = Task { @MainActor in
+                await previous?.value
+                guard !self.stopped else { return }
+                do {
+                    try await self.beginCapture(with: selectedFilter)
+                    self.resumeSelection()
+                } catch {
+                    guard !self.stopped else { return }
+                    if !self.resumeSelection(throwing: error) {
+                        self.onFailure(SpeechSessionError.screenCaptureFailed(error))
+                    }
                 }
             }
         }
@@ -330,11 +357,13 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
 
     @MainActor
     private func beginCapture(with filter: SCContentFilter) async throws {
+        guard !stopped else { throw CancellationError() }
         if isRunning, let stream {
             markStreamForIntentionalStop(stream)
             try await stream.stopCapture()
             isRunning = false
         }
+        guard !stopped else { throw CancellationError() }
 
         let streamConfiguration = SCStreamConfiguration()
         streamConfiguration.capturesAudio = true
@@ -348,6 +377,11 @@ private final class ScreenCaptureAudioInputProvider: NSObject, SCStreamOutput, S
         try captureStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: sampleQueue)
         self.stream = captureStream
         try await captureStream.startCapture()
+        guard !stopped else {
+            markStreamForIntentionalStop(captureStream)
+            try? await captureStream.stopCapture()
+            throw CancellationError()
+        }
         isRunning = true
     }
 

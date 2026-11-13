@@ -92,6 +92,12 @@ for try await result in session.startTranscribing() {
 
 - Do not infer result type from styling—always use `result.isFinal`.
 - Final text is cumulative; volatile text represents the most recent partial string.
+- `finishTranscribing()` closes input, finalizes analysis, then joins the result reader.
+  Keep the consumer alive until its stream ends. `cancelTranscribing()` (and the legacy
+  `stopTranscribing()` alias) discard pending work. Concurrent terminal calls join one owner.
+- Use `AudioSessionOwnership.external` when the host owns AVAudioSession. For a host-owned
+  capture engine, await `startTranscribing(externalAudio:)` and feed its single-use
+  `ExternalAudioInput`; AuralKit does not configure the session or capture microphone audio.
 
 ### Audio Buffer Conversion
 

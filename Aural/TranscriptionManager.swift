@@ -38,6 +38,7 @@ class TranscriptionManager {
     var micInput: AudioInputInfo?
 
     private var transcriptionTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     private var audioInputTask: Task<Void, Never>?
     private var speechDetectorTask: Task<Void, Never>?
@@ -58,7 +59,8 @@ class TranscriptionManager {
     }
 
     func startTranscription() {
-        guard status == .idle else { return }
+        guard status == .idle, transcriptionTask == nil, stopTask == nil else { return }
+        status = .preparing
 
         error = nil
         volatileText = ""
@@ -72,15 +74,20 @@ class TranscriptionManager {
         observeAudioInput(from: session)
         applyVoiceActivationConfiguration(to: session)
 
+        let stream = session.startTranscribing()
         transcriptionTask = Task { @MainActor in
             do {
-                for try await result in session.startTranscribing() {
+                for try await result in stream {
+                    guard self.speechSession === session else { return }
                     self.handleTranscriptionResult(result)
                 }
+                guard self.speechSession === session else { return }
                 self.finishSession()
             } catch is CancellationError {
+                guard self.speechSession === session else { return }
                 self.cleanupSession()
             } catch {
+                guard self.speechSession === session else { return }
                 self.error = error.localizedDescription
                 self.finishSession()
             }
@@ -92,6 +99,11 @@ class TranscriptionManager {
         statusTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for await newStatus in session.statusStream {
+                guard self.speechSession === session else { return }
+                guard newStatus == session.status, self.stopTask == nil else { continue }
+                // The reader may still be draining final results after native
+                // cleanup reports idle. Its completion owns UI readiness.
+                if newStatus == .idle, self.transcriptionTask != nil { continue }
                 self.status = newStatus
             }
         }
@@ -123,9 +135,13 @@ class TranscriptionManager {
     }
 
     func stopTranscription() {
-        guard status != .idle, status != .stopping else { return }
-        Task { @MainActor in
-            await self.speechSession?.stopTranscribing()
+        guard status != .idle, stopTask == nil, let session = speechSession else { return }
+        let reader = transcriptionTask
+        status = .stopping
+        stopTask = Task { @MainActor in
+            await session.finishTranscribing()
+            await reader?.value
+            self.stopTask = nil
         }
         stopAuxiliaryTasks()
     }

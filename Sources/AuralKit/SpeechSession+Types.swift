@@ -20,6 +20,7 @@ extension SpeechSession {
         case liveMicrophone
         case filePlayback
         case screenCapture
+        case externalAudio
     }
 
     enum TranscriptionResultKind: Equatable, Sendable {
@@ -39,6 +40,17 @@ extension SpeechSession {
 
         /// Always use AuralKit's AVAudioEngine and buffer conversion pipeline.
         case legacy
+    }
+
+    /// Responsibility for the application's shared audio session.
+    public enum AudioSessionOwnership: Equatable, Sendable {
+        /// AuralKit configures and activates the session for microphone capture.
+        case managed
+
+        /// The host configures, activates and deactivates the audio session, and
+        /// coordinates interruptions. AuralKit may capture with its own engine,
+        /// but never changes AVAudioSession or automatically resumes it.
+        case external
     }
 
     struct VoiceActivationConfiguration {

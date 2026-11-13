@@ -36,6 +36,7 @@ final class CustomVocabularyDemoViewModel {
     @ObservationIgnored private let session: SpeechSession
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var transcriptionTask: Task<Void, Never>?
+    @ObservationIgnored private var stopTask: Task<Void, Never>?
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private weak var trackedProgress: Progress?
     @ObservationIgnored private var progressObservation: NSKeyValueObservation?
@@ -57,7 +58,8 @@ final class CustomVocabularyDemoViewModel {
     // MARK: - Intent Handlers
 
     func startTranscription() {
-        guard status != .transcribing, status != .preparing else { return }
+        guard status == .idle, transcriptionTask == nil, stopTask == nil else { return }
+        status = .preparing
 
         resetTranscriptionState()
         cancelExistingTasks()
@@ -79,16 +81,35 @@ final class CustomVocabularyDemoViewModel {
     }
 
     func stopTranscription() {
+        endTranscription(cancel: false)
+    }
+
+    private func endTranscription(cancel: Bool) {
+        if stopTask != nil {
+            if cancel {
+                // Stream termination captures its run generation, so this
+                // escalates the current Finish without risking a later start.
+                transcriptionTask?.cancel()
+            }
+            return
+        }
+        guard transcriptionTask != nil || status != .idle else { return }
+        let shouldCancel = cancel || status == .preparing || isCompiling
+        let reader = transcriptionTask
+        status = .stopping
         progressTask?.cancel()
         progressTask = nil
         resetProgressObservation(clearFraction: true)
-        transcriptionTask?.cancel()
-        transcriptionTask = nil
+        if shouldCancel { reader?.cancel() }
 
-        Task { @MainActor in
-            await session.stopTranscribing()
+        stopTask = Task { @MainActor in
+            if shouldCancel { await session.cancelTranscribing() }
+            else { await session.finishTranscribing() }
+            await reader?.value
             partialText = ""
             currentTimeRange = ""
+            stopTask = nil
+            status = .idle
         }
     }
 
@@ -124,7 +145,7 @@ final class CustomVocabularyDemoViewModel {
     }
 
     func teardown() {
-        stopTranscription()
+        endTranscription(cancel: true)
         statusTask?.cancel()
         statusTask = nil
     }
@@ -150,7 +171,7 @@ final class CustomVocabularyDemoViewModel {
     }
 
     var isStartDisabled: Bool {
-        isCompiling || status == .preparing || status == .transcribing
+        isCompiling || status != .idle || transcriptionTask != nil || stopTask != nil
     }
 
     var isStopDisabled: Bool {
@@ -163,6 +184,9 @@ final class CustomVocabularyDemoViewModel {
         statusTask?.cancel()
         statusTask = Task { @MainActor in
             for await newStatus in session.statusStream {
+                guard newStatus == session.status else { continue }
+                if stopTask != nil { continue }
+                if newStatus == .idle, transcriptionTask != nil { continue }
                 status = newStatus
             }
         }
@@ -307,8 +331,9 @@ extension CustomVocabularyDemoViewModel {
 
             isCompiling = true
             defer { isCompiling = false }
-            let stream = try await session.startTranscribing(
-                customVocabulary: descriptor,
+            try await session.configureCustomVocabulary(descriptor)
+            try Task.checkCancellation()
+            let stream = session.startDictationTranscribing(
                 contextualStrings: buildContextualStrings()
             )
             compilationDuration = Date().timeIntervalSince(startTime)
@@ -320,6 +345,7 @@ extension CustomVocabularyDemoViewModel {
             }
             return stream
         } else {
+            try Task.checkCancellation()
             return session.startDictationTranscribing(
                 contextualStrings: buildContextualStrings()
             )
@@ -339,5 +365,6 @@ extension CustomVocabularyDemoViewModel {
         progressTask = nil
         resetProgressObservation(clearFraction: true)
         transcriptionTask = nil
+        if stopTask == nil { status = .idle }
     }
 }

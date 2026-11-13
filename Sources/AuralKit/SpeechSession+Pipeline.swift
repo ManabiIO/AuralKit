@@ -97,9 +97,7 @@ extension SpeechSession {
             await retireFileTranscription(run, error: nil)?.value
             return
         }
-        prepareForStop()
-        await cleanup(cancelRecognizer: true, generation: generation)
-        await finishStream(error: nil, generation: generation)
+        await requestLiveTermination(generation: generation, gracefully: false)?.value
     }
 
     var isPausableStreamingMode: Bool {
@@ -109,24 +107,35 @@ extension SpeechSession {
     func startSpeechPipeline(
         with streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
-        generation: Int
+        generation: Int,
+        externalAudio: ExternalAudioInput? = nil
     ) async {
         do {
             if Self.shouldLog(.notice) {
                 Self.logger.notice("Starting pipeline setup")
             }
-            try Task.checkCancellation()
-            try await ensurePermissions()
-            try Task.checkCancellation()
-            try await setupAudioSession()
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
+            try await authorizeLiveInput(external: externalAudio != nil)
+            try checkLiveSetupAdmission(generation: generation)
+            if externalAudio == nil { try setupAudioSession() }
+            if let prepare = liveTranscriptionHooks?.preparePipeline {
+                try await prepare(generation)
+                try checkLiveSetupAdmission(generation: generation)
+                try bindExternalAudio(externalAudio)
+                streamingMode = externalAudio == nil ? .liveMicrophone : .externalAudio
+                activeResultKind = .speech
+                setStatus(.transcribing)
+                clearPipelineTask(generation: generation)
+                return
+            }
+            try checkLiveSetupAdmission(generation: generation)
 
-            let shouldUseNativeCapture = shouldUseNativeCaptureInputProvider
+            let shouldUseNativeCapture = externalAudio == nil && shouldUseNativeCaptureInputProvider
             let transcriber = try await setUpSpeechTranscriber(
                 contextualStrings: contextualStrings,
                 startAnalyzerImmediately: !shouldUseNativeCapture
             )
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Transcriber prepared with modules")
             }
@@ -137,26 +146,27 @@ extension SpeechSession {
                 generation: generation
             )
 
-            if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
-                try Task.checkCancellation()
+            if let externalAudio {
+                try bindExternalAudio(externalAudio)
+            } else if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
+                try checkLiveSetupAdmission(generation: generation)
                 try startAudioStreaming()
             }
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
 
-            streamingMode = .liveMicrophone
+            streamingMode = externalAudio == nil ? .liveMicrophone : .externalAudio
             setStatus(.transcribing)
             activeResultKind = .speech
+            clearPipelineTask(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Pipeline started (mode: live microphone)")
             }
         } catch is CancellationError {
-            clearPipelineTask(generation: generation)
             await finishCancelledPipelineSetup(generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Pipeline setup failed: \(error.localizedDescription, privacy: .public)")
             }
-            clearPipelineTask(generation: generation)
             await finishWithStartupError(error, generation: generation)
         }
     }
@@ -164,24 +174,35 @@ extension SpeechSession {
     func startDictationPipeline(
         with streamContinuation: AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil,
-        generation: Int
+        generation: Int,
+        externalAudio: ExternalAudioInput? = nil
     ) async {
         do {
             if Self.shouldLog(.notice) {
                 Self.logger.notice("Starting dictation pipeline setup")
             }
-            try Task.checkCancellation()
-            try await ensurePermissions()
-            try Task.checkCancellation()
-            try await setupAudioSession()
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
+            try await authorizeLiveInput(external: externalAudio != nil)
+            try checkLiveSetupAdmission(generation: generation)
+            if externalAudio == nil { try setupAudioSession() }
+            if let prepare = liveTranscriptionHooks?.preparePipeline {
+                try await prepare(generation)
+                try checkLiveSetupAdmission(generation: generation)
+                try bindExternalAudio(externalAudio)
+                streamingMode = externalAudio == nil ? .liveMicrophone : .externalAudio
+                activeResultKind = .dictation
+                setStatus(.transcribing)
+                clearPipelineTask(generation: generation)
+                return
+            }
+            try checkLiveSetupAdmission(generation: generation)
 
-            let shouldUseNativeCapture = shouldUseNativeCaptureInputProvider
+            let shouldUseNativeCapture = externalAudio == nil && shouldUseNativeCaptureInputProvider
             let transcriber = try await setUpDictationTranscriber(
                 contextualStrings: contextualStrings,
                 startAnalyzerImmediately: !shouldUseNativeCapture
             )
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Dictation transcriber prepared with modules")
             }
@@ -192,50 +213,41 @@ extension SpeechSession {
                 generation: generation
             )
 
-            if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
-                try Task.checkCancellation()
+            if let externalAudio {
+                try bindExternalAudio(externalAudio)
+            } else if !(try await setUpNativeCaptureStreamingIfAvailable(generation: generation)) {
+                try checkLiveSetupAdmission(generation: generation)
                 try startAudioStreaming()
             }
-            try Task.checkCancellation()
+            try checkLiveSetupAdmission(generation: generation)
 
-            streamingMode = .liveMicrophone
+            streamingMode = externalAudio == nil ? .liveMicrophone : .externalAudio
             setStatus(.transcribing)
             activeResultKind = .dictation
+            clearPipelineTask(generation: generation)
             if Self.shouldLog(.info) {
                 Self.logger.info("Dictation pipeline started (mode: live microphone)")
             }
         } catch is CancellationError {
-            clearPipelineTask(generation: generation)
             await finishCancelledPipelineSetup(generation: generation)
         } catch {
             if Self.shouldLog(.error) {
                 Self.logger.error("Dictation pipeline setup failed: \(error.localizedDescription, privacy: .public)")
             }
-            clearPipelineTask(generation: generation)
             await finishWithStartupError(error, generation: generation)
         }
     }
 
-    /// Unwind a pipeline whose setup task was cancelled by `cleanup` (stop or stream termination).
-    ///
-    /// The canceller already ran `cleanup`, but this task may have created additional state
-    /// (transcriber, analyzer, audio taps) after that cleanup finished, so run it once more.
-    /// `finishStream` is a no-op when the canceller already finished the stream, and both steps
-    /// are skipped when a newer stream generation owns the session state.
+    /// Request the run's joined teardown, then let this setup task return. The
+    /// terminal owner waits for setup before detaching anything it created.
     func finishCancelledPipelineSetup(generation: Int) async {
-        guard generation == sessionGeneration else { return }
-        if Self.shouldLog(.debug) {
-            Self.logger.debug("Pipeline setup cancelled; unwinding")
-        }
-        await cleanup(cancelRecognizer: true, generation: generation)
-        guard generation == sessionGeneration else { return }
-        await finishStream(error: nil, generation: generation)
+        requestLiveTermination(generation: generation, gracefully: false)
     }
 
     func finishWithStartupError(_ error: Error, generation: Int) async {
         guard generation == sessionGeneration else { return }
-        // A cancelled setup task means another teardown already owns the stream; unwind
-        // quietly instead of surfacing a spurious error to a stream that was stopped on purpose.
+        // Explicit cancellation owns the result stream; do not replace it with
+        // an error produced while the interrupted native setup unwinds.
         if Task.isCancelled {
             await finishCancelledPipelineSetup(generation: generation)
             return
@@ -243,9 +255,7 @@ extension SpeechSession {
         if Self.shouldLog(.error) {
             Self.logger.error("Finishing due to startup error: \(error.localizedDescription, privacy: .public)")
         }
-        prepareForStop()
-        await cleanup(cancelRecognizer: true, generation: generation)
-        await finishStream(error: error, generation: generation)
+        requestLiveTermination(generation: generation, gracefully: false, error: error)
     }
 
     func finishFromRecognizerTask(error: Error?, generation: Int) async {
@@ -261,9 +271,10 @@ extension SpeechSession {
                 Self.logger.notice("Finishing from recognizer without error")
             }
         }
-        prepareForStop()
-        await cleanup(cancelRecognizer: false, generation: generation)
-        await finishStream(error: error, generation: generation)
+        // The terminal task joins this reader. Never await that task here.
+        if liveTranscription?.terminalTask == nil || error != nil {
+            requestLiveTermination(generation: generation, gracefully: error == nil, error: error)
+        }
     }
 
     /// Tear down the active pipeline.
@@ -363,18 +374,21 @@ extension SpeechSession {
 
     // MARK: - Helper Methods
 
-    func setupAudioSession() async throws {
-#if os(iOS)
-        try await MainActor.run {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(
-                audioConfig.category,
-                mode: audioConfig.mode,
-                options: audioConfig.options
-            )
-            try audioSession.setActive(true)
-            isAudioSessionActive = true
+    func setupAudioSession() throws {
+        guard audioSessionOwnership == .managed else { return }
+        if let configure = liveTranscriptionHooks?.configureAudioSession {
+            try configure()
+            return
         }
+#if os(iOS)
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(
+            audioConfig.category,
+            mode: audioConfig.mode,
+            options: audioConfig.options
+        )
+        try audioSession.setActive(true)
+        isAudioSessionActive = true
 #endif
 #if os(iOS) || os(macOS)
         publishCurrentAudioInputInfo()
@@ -382,8 +396,8 @@ extension SpeechSession {
     }
 
 #if os(iOS)
-    private func deactivateAudioSessionIfNeeded() {
-        guard isAudioSessionActive else { return }
+    func deactivateAudioSessionIfNeeded() {
+        guard audioSessionOwnership == .managed, isAudioSessionActive else { return }
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setActive(false, options: [.notifyOthersOnDeactivation])
@@ -398,7 +412,7 @@ extension SpeechSession {
         }
     }
 #else
-    private func deactivateAudioSessionIfNeeded() {}
+    func deactivateAudioSessionIfNeeded() {}
 #endif
 
     func createSpeechRecognizerTask(
@@ -427,7 +441,7 @@ extension SpeechSession {
         )
     }
 
-    private func createRecognizerTask<Sequence: AsyncSequence>(
+    func createRecognizerTask<Sequence: AsyncSequence>(
         label: String,
         results: Sequence,
         streamContinuation: AsyncThrowingStream<Sequence.Element, Error>.Continuation,
@@ -439,6 +453,9 @@ extension SpeechSession {
 
             do {
                 for try await result in results {
+                    try Task.checkCancellation()
+                    guard generation == self.sessionGeneration,
+                          self.liveTranscription?.cancelRequested != true else { return }
                     streamContinuation.yield(result)
                 }
                 if Self.shouldLog(.notice) {
@@ -448,6 +465,9 @@ extension SpeechSession {
             } catch is CancellationError {
                 if Self.shouldLog(.debug) {
                     Self.logger.debug("\(label, privacy: .public) cancelled")
+                }
+                if self.liveTranscription?.cancelRequested != true {
+                    await self.finishFromRecognizerTask(error: CancellationError(), generation: generation)
                 }
             } catch {
                 if Self.shouldLog(.error) {

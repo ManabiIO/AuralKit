@@ -80,7 +80,7 @@ let streamTask = Task {
 
 // Later, when you want to stop capturing audio
 Task {
-    await session.stopTranscribing()
+    await session.finishTranscribing()
     await streamTask.value
 }
 ```
@@ -140,10 +140,66 @@ let streamTask = Task {
 
 // Stop when needed
 Task {
-    await session.stopTranscribing()
+    await session.finishTranscribing()
     await streamTask.value
 }
 ```
+
+### Finishing and cancelling
+
+Use `await session.finishTranscribing()` when the user finishes speaking. It closes
+audio input, asks the analyzer to finalize accepted audio, drains the result reader,
+and only then ends the public stream. Keep the task consuming that stream alive;
+cancelling the consumer requests cancellation and can discard the last words.
+Concurrent Finish calls join the same operation. Errors still arrive through the
+result stream. During initial setup, Finish cancels the unready pipeline and waits
+for setup to return. For a file transcription, Finish waits for the whole file.
+
+Use `await session.cancelTranscribing()` to abandon pending recognition. Cancel can
+interrupt a Finish that is still finalizing. The existing `stopTranscribing()` method
+remains a cancellation alias for compatibility. Either method joins owned tasks
+before the session admits another start.
+
+### Host-owned audio
+
+If AuralKit should capture the microphone but your application manages the shared
+audio session, initialize with `audioSessionOwnership: .external`. Configure and
+activate the session before starting. AuralKit will not change its category, activate
+or deactivate it, or automatically recover it after interruptions. The host should
+coordinate `pauseTranscribing()` and `resumeTranscribing()` with its session owner.
+This mode uses the AVAudioEngine path to avoid AVCaptureSession's independent audio
+session configuration.
+
+When the application already has a capture engine, feed that engine's buffers:
+
+```swift
+let session = SpeechSession(locale: .current)
+let input = ExternalAudioInput()
+let results = try await session.startTranscribing(externalAudio: input)
+let consumer = Task {
+    for try await result in results {
+        // Handle final and volatile results as usual.
+        print(result.text)
+    }
+}
+
+// In the host's existing audio callback, in capture order:
+// try input.append(buffer)
+
+// On Finish, the host can keep its capture engine running for other consumers.
+await session.finishTranscribing()
+try await consumer.value
+```
+
+The external-start overload returns only once the input is ready. It requests speech
+recognition authorization, but does not request microphone permission, start capture,
+or configure/activate an audio session, regardless of `audioSessionOwnership`. The
+host owns those responsibilities. `append` converts buffers to the analyzer format
+and copies passthrough buffers synchronously so capture buffers may be reused after
+it returns. Handle thrown conversion errors in the host callback. It returns `false`
+after the input has closed; a closed handle cannot feed a replacement transcription.
+Create a new `ExternalAudioInput` for every start. A dictation/custom-vocabulary
+overload is also available: `startDictationTranscribing(externalAudio:)`.
 
 ## Demo App
 
@@ -449,7 +505,13 @@ public final class SpeechSession {
     /// Start transcribing - returns stream of SpeechTranscriber.Result
     public func startTranscribing() -> AsyncThrowingStream<SpeechTranscriber.Result, Error>
 
-    /// Stop transcribing
+    /// Finalize accepted audio and drain final results
+    public func finishTranscribing() async
+
+    /// Discard pending recognition and join cleanup
+    public func cancelTranscribing() async
+
+    /// Compatibility alias for cancellation
     public func stopTranscribing() async
 }
 ```

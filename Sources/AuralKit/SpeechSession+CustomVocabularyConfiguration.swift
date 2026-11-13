@@ -78,13 +78,14 @@ extension SpeechSession {
     ) -> AsyncThrowingStream<DictationTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<DictationTranscriber.Result, Error>.makeStream()
 
-        guard fileTranscription == nil, continuation == nil, recognizerTask == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
 
-        let generation = beginStreamGeneration()
-        newContinuation.onTermination = { [weak self] _ in
+        let generation = beginLiveTranscription().generation
+        newContinuation.onTermination = { [weak self] termination in
+            guard case .cancelled = termination else { return }
             Task { @MainActor [weak self] in
                 await self?.handleStreamTermination(generation: generation)
             }

@@ -183,6 +183,7 @@ extension SpeechSession {
     }
 
     func handleAudioSessionInterruption(typeValue: UInt?, optionsValue: UInt?) async {
+        guard audioSessionOwnership == .managed else { return }
         guard let typeValue,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
             return
@@ -221,6 +222,8 @@ extension SpeechSession {
     private func handleInterruptionEnded(options: AVAudioSession.InterruptionOptions) async {
         guard shouldResumeAfterInterruption else { return }
         shouldResumeAfterInterruption = false
+        guard status == .paused, streamingMode == .liveMicrophone,
+              liveTranscription?.terminalTask == nil else { return }
         let generation = sessionGeneration
 
         guard options.contains(.shouldResume) else {
@@ -232,10 +235,11 @@ extension SpeechSession {
         }
 
         do {
-            try await setupAudioSession()
+            try setupAudioSession()
             // The session can be stopped and restarted while the audio session is being
             // reconfigured; a stale interruption must not resume or tear down the newer stream.
-            guard generation == sessionGeneration else { return }
+            guard generation == sessionGeneration, status == .paused,
+                  liveTranscription?.terminalTask == nil else { return }
             try startAudioStreaming()
             setStatus(.transcribing)
             if Self.shouldLog(.notice) {
@@ -257,9 +261,7 @@ extension SpeechSession {
     /// finish its stream.
     private func finishInterruptedSession(error: Error?, generation: Int) async {
         guard generation == sessionGeneration else { return }
-        prepareForStop()
-        await cleanup(cancelRecognizer: true, generation: generation)
-        await finishStream(error: error, generation: generation)
+        await requestLiveTermination(generation: generation, gracefully: false, error: error)?.value
     }
 #elseif os(macOS)
     func handleEngineConfigurationChange() async {
@@ -334,6 +336,7 @@ extension SpeechSession {
 #endif
 
     func reset() async throws {
+        guard streamingMode == .liveMicrophone, status != .stopping else { return }
         if Self.shouldLog(.debug) {
             Self.logger.debug("Resetting audio engine")
         }
