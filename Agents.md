@@ -98,6 +98,9 @@ for try await result in session.startTranscribing() {
 - Use `AudioSessionOwnership.external` when the host owns AVAudioSession. For a host-owned
   capture engine, await `startTranscribing(externalAudio:)` and feed its single-use
   `ExternalAudioInput`; AuralKit does not configure the session or capture microphone audio.
+- The custom-vocabulary start overload owns compilation as part of live startup and returns
+  when ready. Finish/Cancel must join it before restart. Standalone vocabulary configuration
+  reserves idle admission until completion; cancel its calling task to abandon it.
 
 ### Audio Buffer Conversion
 

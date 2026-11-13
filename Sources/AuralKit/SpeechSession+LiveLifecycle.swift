@@ -70,6 +70,28 @@ extension SpeechSession {
     var canStartTranscription: Bool {
         fileTranscription == nil && liveTranscription == nil && continuation == nil
             && pipelineTask == nil && recognizerTask == nil && streamingMode == .inactive
+            && !isConfiguringCustomVocabulary
+    }
+
+    /// Async starts keep ownership while awaiting setup, including operations
+    /// such as model compilation that may not immediately honor cancellation.
+    func awaitLiveSetup(_ setup: Task<Void, Never>, run: LiveTranscriptionRun) async throws {
+        await withTaskCancellationHandler {
+            await setup.value
+        } onCancel: {
+            // Set the setup flag immediately, before the main-actor teardown
+            // can run, so an awaited compiler or authorization cannot resume
+            // into additional setup in the intervening scheduling window.
+            setup.cancel()
+            Task { @MainActor [weak self] in
+                self?.requestLiveTermination(generation: run.generation, gracefully: false)
+            }
+        }
+        if Task.isCancelled || run.cancelRequested || liveTranscription !== run {
+            await requestLiveTermination(generation: run.generation, gracefully: false)?.value
+            throw run.error ?? CancellationError()
+        }
+        if let error = run.error { throw error }
     }
 
     func beginLiveTranscription() -> LiveTranscriptionRun {

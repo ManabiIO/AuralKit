@@ -62,10 +62,10 @@ import AuralKit
 // Create a speech session with your preferred locale
 let session = SpeechSession(locale: .current)
 
+// Register startup before scheduling its result consumer.
+let stream = session.startTranscribing()
 let streamTask = Task {
     do {
-        // Start the async stream
-        let stream = session.startTranscribing()
         for try await result in stream {
             if result.isFinal {
                 print("Final: \(result.text)")
@@ -113,12 +113,11 @@ import AuralKit
 let session = SpeechSession()
 
 // Or specify a locale
-let session = SpeechSession(locale: Locale(identifier: "es-ES"))
+// let session = SpeechSession(locale: Locale(identifier: "es-ES"))
 
+let stream = session.startTranscribing()
 let streamTask = Task {
     do {
-        // Start transcribing
-        let stream = session.startTranscribing()
         for try await result in stream {
             let attributedText = result.text
 
@@ -159,6 +158,19 @@ Use `await session.cancelTranscribing()` to abandon pending recognition. Cancel 
 interrupt a Finish that is still finalizing. The existing `stopTranscribing()` method
 remains a cancellation alias for compatibility. Either method joins owned tasks
 before the session admits another start.
+
+### Custom vocabulary startup
+
+`try await session.startTranscribing(customVocabulary: vocabulary)` owns both
+vocabulary compilation and dictation startup, returning once the pipeline is ready.
+Canceling the calling task, or calling Finish/Cancel during startup, waits for any
+in-flight compilation to return before releasing the run. An abandoned compilation
+cannot replace the session's configuration or start microphone capture afterward.
+
+For separate preparation, `try await session.configureCustomVocabulary(vocabulary)`
+requires an idle session and rejects competing configuration and transcription starts
+until it returns. Cancel its calling task to abandon preparation; session Finish/Cancel
+methods operate on transcription runs, not standalone configuration tasks.
 
 ### Host-owned audio
 

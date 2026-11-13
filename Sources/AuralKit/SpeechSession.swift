@@ -81,6 +81,7 @@ public final class SpeechSession {
     var customVocabularyConfiguration: SFSpeechLanguageModel.Configuration?
     var customVocabularyCacheKey: String?
     var customVocabularyOutputDirectory: URL?
+    var isConfiguringCustomVocabulary = false
     var activeResultKind: TranscriptionResultKind?
 
     // MARK: - Public Observables

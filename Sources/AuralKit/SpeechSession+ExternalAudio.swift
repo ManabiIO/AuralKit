@@ -97,7 +97,7 @@ extension SpeechSession {
             )
         }
         pipelineTask = setup
-        try await awaitExternalAudioSetup(setup, run: run)
+        try await awaitLiveSetup(setup, run: run)
         return stream
     }
 
@@ -124,23 +124,8 @@ extension SpeechSession {
             )
         }
         pipelineTask = setup
-        try await awaitExternalAudioSetup(setup, run: run)
+        try await awaitLiveSetup(setup, run: run)
         return stream
-    }
-
-    private func awaitExternalAudioSetup(_ setup: Task<Void, Never>, run: LiveTranscriptionRun) async throws {
-        await withTaskCancellationHandler {
-            await setup.value
-        } onCancel: {
-            Task { @MainActor [weak self] in
-                self?.requestLiveTermination(generation: run.generation, gracefully: false)
-            }
-        }
-        if Task.isCancelled || run.cancelRequested || liveTranscription !== run {
-            await requestLiveTermination(generation: run.generation, gracefully: false)?.value
-            throw run.error ?? CancellationError()
-        }
-        if let error = run.error { throw error }
     }
 
     func authorizeLiveInput(external: Bool) async throws {
