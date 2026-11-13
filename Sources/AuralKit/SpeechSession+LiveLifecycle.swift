@@ -11,6 +11,7 @@ final class LiveTranscriptionRun {
     var finalizationTask: Task<Void, Error>?
     var cancellationTask: Task<Void, Never>?
     var nativeAnalysisTask: Task<Void, Never>?
+    var captureControlTask: Task<Void, Error>?
     var cancelRequested = false
     var error: Error?
 
@@ -25,6 +26,8 @@ struct LiveTranscriptionHooks {
     var finalizeInput: (@MainActor @Sendable () async throws -> Void)?
     var cancelAnalyzer: (@MainActor @Sendable () async -> Void)?
     var configureAudioSession: (@MainActor @Sendable () throws -> Void)?
+    var pauseCapture: (@MainActor @Sendable () async -> Void)?
+    var resumeCapture: (@MainActor @Sendable () async throws -> Void)?
 }
 
 @available(iOS 26.0, macOS 26.0, *)
@@ -121,6 +124,7 @@ extension SpeechSession {
             recognizerTask?.cancel()
             nativeCaptureAnalysisTask?.cancel()
             run.nativeAnalysisTask?.cancel()
+            run.captureControlTask?.cancel()
             run.finalizationTask?.cancel()
             startLiveAnalyzerCancellation(run)
         }
@@ -154,6 +158,9 @@ extension SpeechSession {
         // The screen picker owns a checked continuation. Stop it before joining
         // setup, because task cancellation alone cannot resume that continuation.
         await stopScreenCaptureStreamingIfNeeded()
+        // A paused/resumed native provider can still be completing an async
+        // control operation. Join it before finalizing or admitting another run.
+        try? await run.captureControlTask?.value
         // Setup can resume from an uncancellable authorization/model operation.
         // Keep admission closed and join it before detaching shared resources.
         await pipelineTask?.value

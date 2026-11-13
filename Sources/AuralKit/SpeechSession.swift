@@ -358,42 +358,4 @@ public final class SpeechSession {
         return startTranscribing(contextualStrings: [.general: contextualStrings])
     }
 
-    /// Pause capture without tearing down the analyzer pipeline.
-    ///
-    /// Safe to call only when the session is actively transcribing live audio (microphone or
-    /// screen capture). Calls during file transcription or in any other state are ignored.
-    public func pauseTranscribing() async {
-        guard status == .transcribing, isPausableStreamingMode else { return }
-        let generation = sessionGeneration
-        if streamingMode == .screenCapture {
-            await pauseScreenCaptureStreamingIfNeeded()
-        } else {
-            stopAudioStreaming()
-        }
-        guard generation == sessionGeneration, status == .transcribing,
-              liveTranscription?.terminalTask == nil else { return }
-        setStatus(.paused)
-    }
-
-    /// Resume a paused capture session.
-    ///
-    /// - Throws: `SpeechSessionError` if audio streaming cannot restart.
-    public func resumeTranscribing() async throws {
-        guard status == .paused, isPausableStreamingMode else { return }
-        let generation = sessionGeneration
-        do {
-            if streamingMode == .screenCapture {
-                try await resumeScreenCaptureStreamingIfNeeded()
-            } else {
-                try startAudioStreaming()
-            }
-            guard generation == sessionGeneration, status == .paused,
-                  liveTranscription?.terminalTask == nil else { return }
-            setStatus(.transcribing)
-        } catch {
-            await requestLiveTermination(generation: generation, gracefully: false, error: error)?.value
-            throw error
-        }
-    }
-
 }

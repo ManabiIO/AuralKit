@@ -59,6 +59,8 @@ final class CustomVocabularyDemoViewModel {
 
     func startTranscription() {
         guard status == .idle, transcriptionTask == nil, stopTask == nil else { return }
+        // A retained tab can start again after onDisappear cancelled observation.
+        if statusTask == nil { bindStatusStream() }
         status = .preparing
 
         resetTranscriptionState()
@@ -131,7 +133,7 @@ final class CustomVocabularyDemoViewModel {
 
     func handleToggleChange(_ isEnabled: Bool) {
         isCustomVocabularyEnabled = isEnabled
-        if !isEnabled, status == .transcribing || status == .preparing {
+        if !isEnabled, status == .transcribing || status == .preparing || status == .paused {
             stopTranscription()
         }
     }
@@ -182,12 +184,14 @@ final class CustomVocabularyDemoViewModel {
 
     private func bindStatusStream() {
         statusTask?.cancel()
-        statusTask = Task { @MainActor in
-            for await newStatus in session.statusStream {
-                guard newStatus == session.status else { continue }
-                if stopTask != nil { continue }
-                if newStatus == .idle, transcriptionTask != nil { continue }
-                status = newStatus
+        let statuses = session.statusStream
+        statusTask = Task { @MainActor [weak self] in
+            for await newStatus in statuses {
+                guard let self else { return }
+                guard newStatus == self.session.status else { continue }
+                if self.stopTask != nil { continue }
+                if newStatus == .idle, self.transcriptionTask != nil { continue }
+                self.status = newStatus
             }
         }
     }
@@ -345,6 +349,9 @@ extension CustomVocabularyDemoViewModel {
             }
             return stream
         } else {
+            // Disabling the demo option must also remove a previously installed
+            // model from the reused session before starting ordinary dictation.
+            try await session.configureCustomVocabulary(nil)
             try Task.checkCancellation()
             return session.startDictationTranscribing(
                 contextualStrings: buildContextualStrings()

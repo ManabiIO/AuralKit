@@ -159,6 +159,11 @@ interrupt a Finish that is still finalizing. The existing `stopTranscribing()` m
 remains a cancellation alias for compatibility. Either method joins owned tasks
 before the session admits another start.
 
+For live microphone and screen capture, repeated Pause or Resume calls share the
+in-flight native operation. Finish and Cancel also wait for pending capture controls
+before the session can restart. A Resume interrupted by termination can still throw
+to its caller; it does not interrupt an already requested Finish's final-result drain.
+
 ### Custom vocabulary startup
 
 `try await session.startTranscribing(customVocabulary: vocabulary)` owns both
