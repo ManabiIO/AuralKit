@@ -5,6 +5,9 @@ import Speech
 @available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
     var shouldUseNativeCaptureInputProvider: Bool {
+        // AVCaptureSession can independently configure the application's audio
+        // session. Use AVAudioEngine when the host owns that session instead.
+        guard audioSessionOwnership == .managed else { return false }
 #if swift(>=6.4)
         if #available(iOS 27.0, macOS 27.0, *) {
             return inputProviderPreference == .automatic
@@ -29,6 +32,20 @@ extension SpeechSession {
             tearDownNativeCaptureStreamingIfAvailable()
         }
 #endif
+    }
+
+    /// Releasing the capture session/output terminates the provider's input
+    /// sequence. Keep its analysis task alive so it can drain and finalize.
+    func endNativeCaptureInput() -> Task<Void, Never>? {
+        let task = nativeCaptureAnalysisTask
+        nativeCaptureAnalysisTask = nil
+#if swift(>=6.4)
+        if #available(iOS 27.0, macOS 27.0, *), nativeCaptureSession != nil {
+            _ = stopPreparedNativeCaptureStreaming()
+        }
+#endif
+        nativeCaptureSession = nil
+        return task
     }
 
     func restartNativeCaptureStreamingIfAvailable() throws -> Bool {
@@ -87,7 +104,9 @@ extension SpeechSession {
                     try await analyzer.finalizeAndFinishThroughEndOfInput()
                 }
             } catch is CancellationError {
-                // Cancellation is expected during explicit cleanup.
+                if !Task.isCancelled {
+                    await self?.finishFromNativeCaptureAnalysis(CancellationError(), generation: generation)
+                }
             } catch {
                 await self?.finishFromNativeCaptureAnalysis(error, generation: generation)
             }

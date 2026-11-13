@@ -36,6 +36,7 @@ final class CustomVocabularyDemoViewModel {
     @ObservationIgnored private let session: SpeechSession
     @ObservationIgnored private var statusTask: Task<Void, Never>?
     @ObservationIgnored private var transcriptionTask: Task<Void, Never>?
+    @ObservationIgnored private var stopTask: Task<Void, Never>?
     @ObservationIgnored private var progressTask: Task<Void, Never>?
     @ObservationIgnored private weak var trackedProgress: Progress?
     @ObservationIgnored private var progressObservation: NSKeyValueObservation?
@@ -57,7 +58,10 @@ final class CustomVocabularyDemoViewModel {
     // MARK: - Intent Handlers
 
     func startTranscription() {
-        guard status != .transcribing, status != .preparing else { return }
+        guard status == .idle, transcriptionTask == nil, stopTask == nil else { return }
+        // A retained tab can start again after onDisappear cancelled observation.
+        if statusTask == nil { bindStatusStream() }
+        status = .preparing
 
         resetTranscriptionState()
         cancelExistingTasks()
@@ -79,16 +83,35 @@ final class CustomVocabularyDemoViewModel {
     }
 
     func stopTranscription() {
+        endTranscription(cancel: false)
+    }
+
+    private func endTranscription(cancel: Bool) {
+        if stopTask != nil {
+            if cancel {
+                // Stream termination captures its run generation, so this
+                // escalates the current Finish without risking a later start.
+                transcriptionTask?.cancel()
+            }
+            return
+        }
+        guard transcriptionTask != nil || status != .idle else { return }
+        let shouldCancel = cancel || status == .preparing || isCompiling
+        let reader = transcriptionTask
+        status = .stopping
         progressTask?.cancel()
         progressTask = nil
         resetProgressObservation(clearFraction: true)
-        transcriptionTask?.cancel()
-        transcriptionTask = nil
+        if shouldCancel { reader?.cancel() }
 
-        Task { @MainActor in
-            await session.stopTranscribing()
+        stopTask = Task { @MainActor in
+            if shouldCancel { await session.cancelTranscribing() }
+            else { await session.finishTranscribing() }
+            await reader?.value
             partialText = ""
             currentTimeRange = ""
+            stopTask = nil
+            status = .idle
         }
     }
 
@@ -110,7 +133,7 @@ final class CustomVocabularyDemoViewModel {
 
     func handleToggleChange(_ isEnabled: Bool) {
         isCustomVocabularyEnabled = isEnabled
-        if !isEnabled, status == .transcribing || status == .preparing {
+        if !isEnabled, status == .transcribing || status == .preparing || status == .paused {
             stopTranscription()
         }
     }
@@ -124,7 +147,7 @@ final class CustomVocabularyDemoViewModel {
     }
 
     func teardown() {
-        stopTranscription()
+        endTranscription(cancel: true)
         statusTask?.cancel()
         statusTask = nil
     }
@@ -150,7 +173,7 @@ final class CustomVocabularyDemoViewModel {
     }
 
     var isStartDisabled: Bool {
-        isCompiling || status == .preparing || status == .transcribing
+        isCompiling || status != .idle || transcriptionTask != nil || stopTask != nil
     }
 
     var isStopDisabled: Bool {
@@ -161,9 +184,14 @@ final class CustomVocabularyDemoViewModel {
 
     private func bindStatusStream() {
         statusTask?.cancel()
-        statusTask = Task { @MainActor in
-            for await newStatus in session.statusStream {
-                status = newStatus
+        let statuses = session.statusStream
+        statusTask = Task { @MainActor [weak self] in
+            for await newStatus in statuses {
+                guard let self else { return }
+                guard newStatus == self.session.status else { continue }
+                if self.stopTask != nil { continue }
+                if newStatus == .idle, self.transcriptionTask != nil { continue }
+                self.status = newStatus
             }
         }
     }
@@ -307,8 +335,9 @@ extension CustomVocabularyDemoViewModel {
 
             isCompiling = true
             defer { isCompiling = false }
-            let stream = try await session.startTranscribing(
-                customVocabulary: descriptor,
+            try await session.configureCustomVocabulary(descriptor)
+            try Task.checkCancellation()
+            let stream = session.startDictationTranscribing(
                 contextualStrings: buildContextualStrings()
             )
             compilationDuration = Date().timeIntervalSince(startTime)
@@ -320,6 +349,10 @@ extension CustomVocabularyDemoViewModel {
             }
             return stream
         } else {
+            // Disabling the demo option must also remove a previously installed
+            // model from the reused session before starting ordinary dictation.
+            try await session.configureCustomVocabulary(nil)
+            try Task.checkCancellation()
             return session.startDictationTranscribing(
                 contextualStrings: buildContextualStrings()
             )
@@ -339,5 +372,6 @@ extension CustomVocabularyDemoViewModel {
         progressTask = nil
         resetProgressObservation(clearFraction: true)
         transcriptionTask = nil
+        if stopTask == nil { status = .idle }
     }
 }
