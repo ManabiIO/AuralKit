@@ -60,9 +60,11 @@ struct ScreenCaptureTransitionTests {
             #expect(!owner.isRunning)
             #expect(!old.capturing)
             #expect(replacement.starts == 0)
-            let resumed = await fixture.track(owner.resume()).value
-            #expect(resumed.isCurrent())
-            #expect(resumed.error == nil)
+            var resumed: Result<Void, Error>?
+            let terminal = await fixture.track(owner.resume { resumed = $0 }).value
+            #expect(terminal == nil)
+            try #require(resumed).get()
+            #expect(owner.desiredState == .running)
             #expect(replacement.starts == 1)
             #expect(old.starts == 1)
             try await fixture.track(owner.stop()).value
@@ -166,7 +168,7 @@ private final class PublicCaptureFixture {
             makeProvider: { [self] format, inputs, failure in
                 let provider = ScreenCaptureAudioInputProvider(
                     options: .init(), targetFormat: format, inputContinuation: inputs,
-                    onFailure: failure, transitions: owner,
+                    onTermination: failure, transitions: owner,
                     presentPicker: { [self] _ in presented.open() },
                     dismissPicker: { [self] _ in dismissed.open() }
                 )
@@ -288,7 +290,7 @@ extension ScreenCaptureTransitionTests {
                 try await resume.value
                 try await successorStarted.wait()
                 #expect(!runtime.consumerFinished)
-                #expect(runtime.session.status == .paused)
+                #expect(runtime.session.status == .transcribing)
                 #expect(runtime.owner.stream === successor)
                 // Explicitly resume the current selection, then fail that current start.
                 try await runtime.session.resumeTranscribing()

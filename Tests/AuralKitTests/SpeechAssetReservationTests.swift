@@ -264,7 +264,7 @@ struct SpeechAssetReservationTests {
         }
     }
 
-    @Test("manager download failure returns its explicitly acquired locale")
+    @Test("failed installation acquires no explicit locale reservation")
     @MainActor
     func downloadFailure() async throws {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
@@ -274,8 +274,8 @@ struct SpeechAssetReservationTests {
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             if case .success = await operation.result { Issue.record("Download failure was ignored") }
             let state = await fixture.inventory.snapshot
-            #expect(!state.reserves.isEmpty)
-            #expect(state.releases.count == state.reserves.count)
+            #expect(state.reserves.isEmpty)
+            #expect(state.releases.isEmpty)
             #expect(state.locales.isEmpty)
         }
     }
@@ -288,7 +288,7 @@ struct SpeechAssetReservationTests {
             let gate = fixture.gate()
             await fixture.inventory.holdReserve(at: gate)
             let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
-            let manager = fixture.manager { _ in Issue.record("Canceled acquisition started a download") }
+            let manager = fixture.manager { _ in }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }
             operation.cancel()
@@ -308,7 +308,7 @@ struct SpeechAssetReservationTests {
             let gate = fixture.gate()
             await fixture.inventory.holdReserve(at: gate)
             let module = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .transcription)
-            let manager = fixture.manager { _ in Issue.record("Retired preparation started a download") }
+            let manager = fixture.manager { _ in }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }
             let cleanup = fixture.start { await manager.releaseLocales() }
@@ -333,15 +333,23 @@ struct SpeechAssetReservationTests {
             let manager = fixture.manager { _ in await gate.wait() }
             let operation = fixture.start { try await manager.ensureAssets(for: [module]) }
             try await fixture.waitUntil { await gate.entered }
-            let cleanup = fixture.start { await manager.releaseLocales() }
+            var cleanupReturned = false
+            let cleanup = fixture.start {
+                await manager.releaseLocales()
+                cleanupReturned = true
+            }
             try await fixture.waitUntil { await manager.cleanupTask != nil }
             var state = await fixture.inventory.snapshot
+            #expect(state.reserves.isEmpty)
             #expect(state.releases.isEmpty)
+            #expect(!cleanupReturned)
             await gate.open()
             if case .success = await operation.result { Issue.record("Retired download was admitted") }
             try await cleanup.value
             state = await fixture.inventory.snapshot
-            #expect(state.releases.count == 1)
+            #expect(cleanupReturned)
+            #expect(state.reserves.isEmpty)
+            #expect(state.releases.isEmpty)
             #expect(state.locales.isEmpty)
         }
     }

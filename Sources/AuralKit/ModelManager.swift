@@ -13,17 +13,23 @@ actor ModelManager {
 
     private let reservations: SpeechAssetReservations
     private let assetDownloader: (@Sendable ([any SpeechModule]) async throws -> Void)?
+    private let installationRequest: @Sendable ([any SpeechModule]) async throws -> AssetInstallationRequest?
     private var leases: Set<SpeechAssetReservations.Lease> = []
+    private var generation = 0
     private var preparations = 0
     private var preparationWaiters: [CheckedContinuation<Void, Never>] = []
     private(set) var cleanupTask: Task<Void, Never>?
 
     init(
         reservations: SpeechAssetReservations = .shared,
-        assetDownloader: (@Sendable ([any SpeechModule]) async throws -> Void)? = nil
+        assetDownloader: (@Sendable ([any SpeechModule]) async throws -> Void)? = nil,
+        installationRequest: @escaping @Sendable ([any SpeechModule]) async throws -> AssetInstallationRequest? = {
+            try await AssetInventory.assetInstallationRequest(supporting: $0)
+        }
     ) {
         self.reservations = reservations
         self.assetDownloader = assetDownloader
+        self.installationRequest = installationRequest
     }
 
     /// Ensure the speech model for the given locale is available
@@ -48,8 +54,8 @@ actor ModelManager {
             return
         }
 
-        try await prepareAssets(for: [module]) { manager in
-            try await manager.downloadAssetsIfNeeded(for: [module])
+        try await prepareAssets(for: [module]) { manager, generation in
+            try await manager.downloadAssetsIfNeeded(for: [module], generation: generation)
         }
     }
 
@@ -59,19 +65,19 @@ actor ModelManager {
         supportedLocales: @escaping @Sendable () async -> [Locale],
         installedLocales: @escaping @Sendable () async -> [Locale]
     ) async throws {
-        try await prepareAssets(for: [module], validate: { manager in
+        try await prepareAssets(for: [module]) { manager, generation in
             guard await manager.localeMatches(provider: supportedLocales, locale: locale) else {
                 throw SpeechSessionError.unsupportedLocale(locale)
             }
-        }, install: { manager in
             if await manager.localeMatches(provider: installedLocales, locale: locale) {
                 manager.logger.notice("Locale \(locale.identifier(.bcp47)) already installed")
+                try manager.requireCurrent(generation)
                 manager.currentDownloadProgress = nil
             } else {
                 manager.logger.info("Ensuring model download for locale \(locale.identifier(.bcp47))")
-                try await manager.downloadAssetsIfNeeded(for: [module])
+                try await manager.downloadAssetsIfNeeded(for: [module], generation: generation)
             }
-        })
+        }
     }
 
     private func localeMatches(
@@ -85,27 +91,28 @@ actor ModelManager {
 
     func ensureAssets(for modules: [any SpeechModule]) async throws {
         guard !modules.isEmpty else { return }
-        try await prepareAssets(for: modules) { manager in
-            try await manager.downloadAssetsIfNeeded(for: modules)
+        try await prepareAssets(for: modules) { manager, generation in
+            try await manager.downloadAssetsIfNeeded(for: modules, generation: generation)
         }
     }
 
-    private func downloadAssetsIfNeeded(for modules: [any SpeechModule]) async throws {
-        try requirePreparation()
+    private func downloadAssetsIfNeeded(for modules: [any SpeechModule], generation: Int) async throws {
+        try requireCurrent(generation)
         if let assetDownloader {
             try await assetDownloader(modules)
             return
         }
-        if let downloader = try await AssetInventory.assetInstallationRequest(supporting: modules) {
-            try requirePreparation()
+        let request = try await reservations.withInventoryAccess {
+            try await self.requestInstallation(for: modules, generation: generation)
+        }
+        if let downloader = request {
+            try requireCurrent(generation)
             currentDownloadProgress = downloader.progress
             logger.info("Starting asset download for \(modules.count) module(s)")
             do {
                 try await downloader.downloadAndInstall()
-                currentDownloadProgress = nil
-                logger.notice("Asset download completed successfully")
             } catch {
-                currentDownloadProgress = nil
+                if self.generation == generation { currentDownloadProgress = nil }
                 logger.error("Asset download failed: \(error.localizedDescription, privacy: .public)")
 
                 // Check for network connectivity errors
@@ -117,28 +124,38 @@ actor ModelManager {
 
                 throw SpeechSessionError.modelDownloadFailed(nsError)
             }
+            try requireCurrent(generation)
+            currentDownloadProgress = nil
+            logger.notice("Asset download completed successfully")
         } else {
+            try requireCurrent(generation)
             currentDownloadProgress = nil
             logger.debug("No asset download required for modules")
         }
     }
 
-    /// Close preparation admission and join it before returning locale leases.
-    /// A late native acquisition/download must not outlive its manager cleanup.
+    private func requestInstallation(
+        for modules: [any SpeechModule], generation: Int
+    ) async throws -> AssetInstallationRequest? {
+        try requireCurrent(generation)
+        return try await installationRequest(modules)
+    }
+
+    /// Close admission and join preparation before returning locale leases.
+    /// Reader may release its input workspace only after this boundary completes.
     func releaseLocales() async {
         if let cleanupTask {
             await cleanupTask.value
             return
         }
+        generation &+= 1
         let cleanup = Task {
             if self.preparations != 0 {
                 await withCheckedContinuation { self.preparationWaiters.append($0) }
             }
             let pending = self.leases
             self.leases.removeAll()
-            for lease in pending {
-                await self.reservations.release(lease)
-            }
+            for lease in pending { await self.reservations.release(lease) }
             self.currentDownloadProgress = nil
             self.cleanupTask = nil
             self.logger.debug("Released \(pending.count) session locale lease(s)")
@@ -149,18 +166,18 @@ actor ModelManager {
 
     private func prepareAssets(
         for modules: [any SpeechModule],
-        validate: @Sendable (isolated ModelManager) async throws -> Void = { _ in },
-        install: @Sendable (isolated ModelManager) async throws -> Void
+        install: @Sendable (isolated ModelManager, Int) async throws -> Void
     ) async throws {
-        try requirePreparation()
+        let generation = self.generation
+        try requireCurrent(generation)
         preparations += 1
         defer { preparationFinished() }
+        // Preserve first-install behavior: downloading may create native reservations.
+        // Those reservations remain borrowed; only explicit acquisitions are owned here.
+        try await install(self, generation)
+        try requireCurrent(generation)
         var acquired: [SpeechAssetReservations.Lease] = []
         do {
-            try await validate(self)
-            try requirePreparation()
-            // These are module-defined asset locales, not guessed equivalents
-            // of the user's preferred transcription language.
             let locales = modules.compactMap { $0 as? any LocaleDependentSpeechModule }
                 .flatMap { $0.selectedLocales }
             var requested = Set<String>()
@@ -172,22 +189,13 @@ actor ModelManager {
                 } catch {
                     throw SpeechSessionError.modelReservationFailed(locale, error)
                 }
-                try requirePreparation()
+                try requireCurrent(generation)
             }
-            try await install(self)
-            try requirePreparation()
             leases.formUnion(acquired)
         } catch {
-            for lease in acquired {
-                await reservations.release(lease)
-            }
+            for lease in acquired { await reservations.release(lease) }
             throw error
         }
-    }
-
-    private func requirePreparation() throws {
-        try Task.checkCancellation()
-        guard cleanupTask == nil else { throw CancellationError() }
     }
 
     private func preparationFinished() {
@@ -196,5 +204,10 @@ actor ModelManager {
         let waiters = preparationWaiters
         preparationWaiters.removeAll()
         for waiter in waiters { waiter.resume() }
+    }
+
+    private func requireCurrent(_ generation: Int) throws {
+        try Task.checkCancellation()
+        guard self.generation == generation, cleanupTask == nil else { throw CancellationError() }
     }
 }

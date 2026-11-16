@@ -15,6 +15,6 @@ struct ScreenCapturePipelineHooks {
     let authorize: @MainActor () async throws -> Void
     let prepareAnalysis: @MainActor () async throws -> ScreenCapturePreparedAnalysis
     let makeProvider: @MainActor (
-        AVAudioFormat, AsyncStream<AnalyzerInput>.Continuation, @escaping @Sendable (Error) -> Void
+        AVAudioFormat, AsyncStream<AnalyzerInput>.Continuation, @escaping @Sendable (Error?) -> Task<Void, Never>
     ) -> any ScreenCaptureInput
 }

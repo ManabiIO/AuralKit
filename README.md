@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Swift Package Manager](https://img.shields.io/badge/SPM-compatible-brightgreen.svg)](https://swift.org/package-manager)
 [![GitHub release](https://img.shields.io/github/release/rryam/AuralKit.svg)](https://github.com/rryam/AuralKit/releases)
-[![Codemagic build status](https://api.codemagic.io/apps/6858c0b3eab03a007ef8b1f6/auralkit/status_badge.svg)](https://codemagic.io/app/6858c0b3eab03a007ef8b1f6/auralkit/latest_build)
+[![CI](https://github.com/rryam/AuralKit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rryam/AuralKit/actions/workflows/ci.yml)
 
 AuralKit is a simple, lightweight Swift wrapper for speech-to-text transcription using iOS 26's `SpeechTranscriber` and `SpeechAnalyzer` APIs while handling microphone capture, buffer conversion, model downloads, and cancellation on your behalf.
 
@@ -21,6 +21,7 @@ AuralKit is a simple, lightweight Swift wrapper for speech-to-text transcription
 - Async streams for lifecycle status, audio inputs, and transcription results
 - Device capability helper to inspect available transcribers and locales
 - Xcode 27-ready file transcription path that can use Speech's native analyzer file input when built with Swift 6.4+
+- Transcription from a selected audio track in a local movie or other media file on iOS and macOS 27+
 - Xcode 27-ready live capture and analyzer preheating configuration with Xcode 26 fallbacks
 - ScreenCaptureKit-backed transcription for selected content audio on iOS 27+ and macOS 26+
 - SwiftUI-friendly API that mirrors Apple's sample project design
@@ -35,6 +36,7 @@ AuralKit is a simple, lightweight Swift wrapper for speech-to-text transcription
 - [Usage](#usage)
   - [Simple Transcription](#simple-transcription)
   - [Partial Results](#partial-results)
+  - [Media File Audio](#media-file-audio)
   - [Screen Capture Audio](#screen-capture-audio)
 - [Session Observability](#session-observability)
   - [Monitoring Model Downloads](#monitoring-model-downloads)
@@ -58,6 +60,8 @@ This project would not have been possible without Apple's excellent sample code.
 
 ## Quick Start
 
+The examples below use the AuralKit 3.0 API.
+
 ```swift
 import AuralKit
 
@@ -80,9 +84,9 @@ let streamTask = Task {
     }
 }
 
-// Later, when you want to stop capturing audio
+// Later, when you want to finish capturing audio
 Task {
-    await session.stopTranscribing()
+    await session.finishTranscribing()
     await streamTask.value
 }
 ```
@@ -96,11 +100,11 @@ Add AuralKit to your project through Xcode:
 2. Enter: `https://github.com/rryam/AuralKit`
 3. Click Add Package
 
-Or add it to your `Package.swift`:
+Select 3.0.0 in Xcode or add the following dependency to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/rryam/AuralKit", from: "2.1.1")
+    .package(url: "https://github.com/rryam/AuralKit", from: "3.0.0")
 ]
 ```
 
@@ -140,12 +144,23 @@ let streamTask = Task {
     }
 }
 
-// Stop when needed
+// Finish capture and wait for the final results
 Task {
-    await session.stopTranscribing()
+    await session.finishTranscribing()
     await streamTask.value
 }
 ```
+
+### Migrating from AuralKit 2.x
+
+Replace `stopTranscribing()` with `finishTranscribing()` when saving a live transcript. Keep
+reading the result stream until it ends and use `isFinal` to decide what to save. Finish waits
+for an active file transcription to reach the end of the file. If setup is still in progress,
+Finish closes the stream without starting capture.
+
+Use `cancelTranscribing()` to abandon a run. The stream ends with `CancellationError`, including
+when using the one-shot file API. The stream may still contain results already yielded before
+cancellation. Clear any displayed partial text and handle cancellation separately from errors.
 
 ## Demo App
 
@@ -276,6 +291,28 @@ struct ContentView: View {
 
 The `TranscriptionManager` in the demo app adds language selection, history tracking, and export.
 
+### Media File Audio
+
+With Swift 6.4 and iOS or macOS 27+, pass a local media file to `streamTranscription(fromMediaFile:audioTrackID:options:)`. The default is the first audio track. Use `AVURLAsset` to find a particular audio track, then pass its `trackID`.
+
+```swift
+import AVFoundation
+import AuralKit
+
+let asset = AVURLAsset(url: movieURL)
+let tracks = try await asset.loadTracks(withMediaType: .audio)
+
+if let commentary = tracks.dropFirst().first {
+    let session = SpeechSession()
+    let results = session.streamTranscription(fromMediaFile: movieURL, audioTrackID: commentary.trackID)
+    for try await result in results where result.isFinal {
+        print(result.text)
+    }
+}
+```
+
+Use the default `.automatic` input provider. The file must be in an allowed directory and contain its audio. `FileTranscriptionOptions.maxDuration` applies to the selected track’s duration on the media timeline. The app needs `NSSpeechRecognitionUsageDescription` for the Speech permission prompt.
+
 ### Screen Capture Audio
 
 On OS versions where ScreenCaptureKit can stream selected content audio, AuralKit can transcribe audio chosen with the system picker:
@@ -304,6 +341,8 @@ let stream = session.startTranscribingScreenCapture(
 ```
 
 Screen capture transcription still returns normal `SpeechTranscriber.Result` values. AuralKit handles the ScreenCaptureKit stream, converts audio `CMSampleBuffer`s into analyzer-compatible buffers, and feeds the existing SpeechAnalyzer pipeline.
+
+On OS 27 and later, set `SpeechSession.logging = .debug` to see the native stream's `SCStream.isCapturing` state after capture starts, stops, or updates its content filter. The property reports screen capture activity. Audio delivery can be checked independently by looking at transcription results.
 
 ### Error Handling
 
@@ -451,8 +490,11 @@ public final class SpeechSession {
     /// Start transcribing - returns stream of SpeechTranscriber.Result
     public func startTranscribing() -> AsyncThrowingStream<SpeechTranscriber.Result, Error>
 
-    /// Stop transcribing
-    public func stopTranscribing() async
+    /// End live capture and drain final results
+    public func finishTranscribing() async
+
+    /// Abort transcription with CancellationError
+    public func cancelTranscribing() async
 }
 ```
 

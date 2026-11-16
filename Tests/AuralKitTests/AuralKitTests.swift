@@ -44,6 +44,8 @@ struct SpeechSessionStateTests {
     func stopTranscribingWithoutSessionIsNoOp() async {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
+        await session.finishTranscribing()
+        await session.cancelTranscribing()
         await session.stopTranscribing()
         #expect(await session.modelDownloadProgress == nil)
         #expect(session.status == .idle)

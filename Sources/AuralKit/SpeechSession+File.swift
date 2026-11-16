@@ -68,38 +68,12 @@ public extension SpeechSession {
         options: FileTranscriptionOptions = .init(),
         progressHandler: (@Sendable (Double) -> Void)? = nil
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
-        let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
-
-        guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
-            newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
-            return stream
-        }
-
-        let run = FileTranscriptionRun()
-        fileTranscription = run
-        newContinuation.onTermination = { [weak self, weak run] _ in
-            Task { @MainActor [weak self, weak run] in
-                guard let self, let run else { return }
-                self.retireFileTranscription(run, error: nil)
-            }
-        }
-
-        setStatus(.preparing)
-        continuation = .speech(newContinuation)
-
-        run.setupTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.startFilePipeline(
-                run: run,
-                with: newContinuation,
-                audioFileURL: audioFile,
-                options: options,
-                progressHandler: progressHandler
+        startFileTranscription { session, continuation, run in
+            await session.startFilePipeline(
+                run: run, with: continuation, audioFileURL: audioFile,
+                options: options, progressHandler: progressHandler
             )
         }
-
-        return stream
     }
 
     /// Convenience wrapper that collects final results from file transcription.
@@ -130,6 +104,7 @@ public extension SpeechSession {
         }
         let finalResults = try await stream.reduce(into: [SpeechTranscriber.Result](), accumulator)
 
+        try Task.checkCancellation()
         return finalResults
     }
 }
@@ -198,7 +173,7 @@ private extension SpeechSession {
             if let ingest {
                 completed = try await ingest()
             } else {
-                completed = try await feedAudioFile(validation, progressHandler: progressHandler)
+                completed = try await feedAudioFile(validation, run: run, progressHandler: progressHandler)
             }
             try requireCurrentFileTranscription(run)
             guard completed else {
@@ -212,7 +187,7 @@ private extension SpeechSession {
                     ]
                 ))
             }
-            progressHandler?(1.0)
+            if let progressHandler { reportFileProgress(1.0, handler: progressHandler, run: run) }
             if !run.usesNativeFileAnalyzer {
                 try await finalizeFileInput(run)
             }
@@ -261,6 +236,10 @@ private extension SpeechSession {
         return (audioFile, totalFrames)
     }
 
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+extension SpeechSession {
     func sanitizeAudioFileURL(
         _ url: URL,
         allowedDirectories: [URL]
@@ -293,7 +272,8 @@ private extension SpeechSession {
     func setUpFilePipeline(
         run: FileTranscriptionRun,
         with streamContinuation: AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation,
-        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]?
+        contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]?,
+        mode: StreamingMode = .filePlayback
     ) async throws {
         if Self.shouldLog(.notice) {
             Self.logger.notice("Starting file transcription pipeline")
@@ -310,15 +290,20 @@ private extension SpeechSession {
             run: run, results: transcriber.results, streamContinuation: streamContinuation
         )
 
-        streamingMode = .filePlayback
+        streamingMode = mode
         setStatus(.transcribing)
         if Self.shouldLog(.info) {
             Self.logger.info("File transcription pipeline active (mode: file playback)")
         }
     }
 
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+private extension SpeechSession {
     nonisolated func feedAudioFile(
         _ payload: (file: AVAudioFile, totalFrames: AVAudioFramePosition),
+        run: FileTranscriptionRun,
         progressHandler: (@Sendable (Double) -> Void)?
     ) async throws -> Bool {
 #if swift(>=6.4)
@@ -370,7 +355,7 @@ private extension SpeechSession {
             if let progressHandler, totalFrames > 0 {
                 let progress = min(1.0, max(0.0, Double(processedFrames) / Double(totalFrames)))
                 await MainActor.run {
-                    progressHandler(progress)
+                    self.reportFileProgress(progress, handler: progressHandler, run: run)
                 }
             }
         }
@@ -389,6 +374,50 @@ private extension SpeechSession {
         }
 #endif
         return false
+    }
+
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+extension SpeechSession {
+    typealias FileResultContinuation = AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation
+
+    func startFileTranscription(
+        mode: StreamingMode = .filePlayback,
+        _ setup: @escaping @MainActor (SpeechSession, FileResultContinuation, FileTranscriptionRun) async -> Void
+    ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
+        let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
+        guard continuation == nil, recognizerTask == nil,
+              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
+            newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
+            return stream
+        }
+        let run = FileTranscriptionRun()
+        fileTranscription = run
+        newContinuation.onTermination = { [weak self, weak run] termination in
+            guard case .cancelled = termination else { return }
+            Task { @MainActor [weak self, weak run] in
+                guard let self, let run else { return }
+                self.retireFileTranscription(run, error: CancellationError())
+            }
+        }
+        if mode == .mediaPlayback { streamingMode = mode }
+        setStatus(.preparing)
+        continuation = .speech(newContinuation)
+        run.setupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await setup(self, newContinuation, run)
+        }
+        return stream
+    }
+    func reportFileProgress(
+        _ progress: Double,
+        handler: @Sendable (Double) -> Void,
+        run: FileTranscriptionRun
+    ) {
+        guard !Task.isCancelled, fileTranscription === run, !run.retired,
+              streamingMode == .filePlayback, status == .transcribing else { return }
+        handler(progress)
     }
 
 }

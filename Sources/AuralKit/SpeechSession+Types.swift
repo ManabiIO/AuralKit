@@ -19,6 +19,7 @@ extension SpeechSession {
         case inactive
         case liveMicrophone
         case filePlayback
+        case mediaPlayback
         case screenCapture
     }
 

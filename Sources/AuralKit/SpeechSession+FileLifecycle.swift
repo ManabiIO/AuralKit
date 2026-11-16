@@ -13,6 +13,7 @@ final class FileTranscriptionRun {
     var ingestionTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
     var terminalTask: Task<Void, Never>?
+    var cancellationRequested = false
     var retired = false
 }
 
@@ -29,6 +30,22 @@ struct FileTranscriptionHooks {
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
+    func startFileIngestion(
+        run: FileTranscriptionRun,
+        _ ingest: @escaping @MainActor (SpeechSession) async throws -> Void
+    ) {
+        guard fileTranscription === run, !run.retired else { return }
+        run.ingestionTask = Task { @MainActor [self] in
+            do {
+                try requireCurrentFileTranscription(run)
+                try await ingest(self)
+            } catch {
+                // Independent cancellation is terminal unless retirement already owns it.
+                retireFileTranscription(run, error: error)
+            }
+        }
+    }
+
     /// Ending an autonomous analyzer's input does not finish its analysis.
     /// Keep this run and its reader active while finalization publishes the
     /// last results. The reader requests retirement after draining them.
@@ -38,7 +55,9 @@ extension SpeechSession {
         if let finalizeInput = fileTranscriptionHooks?.finalizeInput {
             try await finalizeInput()
         } else {
-            try await analyzer?.finalizeAndFinishThroughEndOfInput()
+            if try await !finishAnalyzerInput() {
+                retireFileTranscription(run, error: nil)
+            }
         }
     }
 
@@ -107,15 +126,18 @@ extension SpeechSession {
             await run.setupTask?.value
             run.ingestionTask?.cancel()
             run.recognizerTask?.cancel()
-            await run.ingestionTask?.value
             guard self.fileTranscription === run else { return }
             // Finalization ends the result sequence before joining its reader;
             // do not assume an arbitrary result iterator wakes on cancellation.
-            await self.cleanupPipelineResources(cancelRecognizer: true, publishIdle: false)
+            // Cancel native analysis before joining an ingester suspended waiting for input.
+            // The shared cleanup keeps model leases until that child has returned.
+            await self.cleanupPipelineResources(
+                cancelRecognizer: true, publishIdle: false, inputTask: run.ingestionTask
+            )
             await run.recognizerTask?.value
             self.fileTranscriptionHooks = nil
             self.setStatus(.idle)
-            await self.finishStream(error: error)
+            await self.finishStream(error: run.cancellationRequested ? CancellationError() : error)
             self.fileTranscription = nil
             run.setupTask = nil
             run.ingestionTask = nil
