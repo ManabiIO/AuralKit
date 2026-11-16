@@ -9,6 +9,8 @@ import OSLog
 @MainActor
 final class FileTranscriptionRun {
     var usesNativeFileAnalyzer = false
+    var ingestionCompleted = false
+    var resultsCompleted = false
     var setupTask: Task<Void, Never>?
     var ingestionTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
@@ -39,11 +41,30 @@ extension SpeechSession {
             do {
                 try requireCurrentFileTranscription(run)
                 try await ingest(self)
+                try requireCurrentFileTranscription(run)
+                completeFileIngestion(run)
             } catch {
                 // Independent cancellation is terminal unless retirement already owns it.
                 retireFileTranscription(run, error: error)
             }
         }
+    }
+
+    func completeFileIngestion(_ run: FileTranscriptionRun) {
+        guard fileTranscription === run, !run.retired else { return }
+        run.ingestionCompleted = true
+        retireCompletedFile(run)
+    }
+
+    func completeFileResults(_ run: FileTranscriptionRun) {
+        guard fileTranscription === run, !run.retired else { return }
+        run.resultsCompleted = true
+        retireCompletedFile(run)
+    }
+
+    private func retireCompletedFile(_ run: FileTranscriptionRun) {
+        guard run.ingestionCompleted, run.resultsCompleted else { return }
+        retireFileTranscription(run, error: nil)
     }
 
     /// Ending an autonomous analyzer's input does not finish its analysis.
@@ -79,7 +100,7 @@ extension SpeechSession {
                 if Self.shouldLog(.notice) {
                     Self.logger.notice("File recognizer task completed without error")
                 }
-                self.retireFileTranscription(run, error: nil)
+                self.completeFileResults(run)
             } catch is CancellationError {
                 if Self.shouldLog(.debug) {
                     Self.logger.debug("File recognizer task cancelled")

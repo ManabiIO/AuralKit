@@ -194,7 +194,9 @@ extension SpeechSession {
         }
     }
 
-    func setUpScreenCaptureStreaming(options: ScreenCaptureTranscriptionOptions, run: LiveTranscriptionRun) async throws {
+    func setUpScreenCaptureStreaming(
+        options: ScreenCaptureTranscriptionOptions, run: LiveTranscriptionRun
+    ) async throws {
         guard let analyzerFormat, let inputBuilder else {
             throw SpeechSessionError.invalidAudioDataType
         }

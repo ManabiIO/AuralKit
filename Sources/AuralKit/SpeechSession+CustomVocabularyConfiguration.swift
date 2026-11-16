@@ -106,7 +106,10 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) -> AsyncThrowingStream<DictationTranscriber.Result, Error> {
         do {
-            let (stream, newContinuation, run) = try admitDictationTranscription()
+            let admission = try admitDictationTranscription()
+            let stream = admission.stream
+            let newContinuation = admission.continuation
+            let run = admission.run
             run.setupTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.startDictationPipeline(
@@ -121,11 +124,13 @@ extension SpeechSession {
         }
     }
 
-    private func admitDictationTranscription() throws -> (
-        AsyncThrowingStream<DictationTranscriber.Result, Error>,
-        AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation,
-        LiveTranscriptionRun
-    ) {
+    private struct DictationAdmission {
+        let stream: AsyncThrowingStream<DictationTranscriber.Result, Error>
+        let continuation: AsyncThrowingStream<DictationTranscriber.Result, Error>.Continuation
+        let run: LiveTranscriptionRun
+    }
+
+    private func admitDictationTranscription() throws -> DictationAdmission {
         guard continuation == nil, recognizerTask == nil,
               fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
             throw SpeechSessionError.recognitionStreamSetupFailed
@@ -141,7 +146,7 @@ extension SpeechSession {
         }
         setStatus(.preparing)
         continuation = .dictation(newContinuation)
-        return (stream, newContinuation, run)
+        return DictationAdmission(stream: stream, continuation: newContinuation, run: run)
     }
 
     /// Compile and activate the provided custom vocabulary, then begin dictation-backed transcription.
@@ -156,7 +161,10 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async throws -> AsyncThrowingStream<DictationTranscriber.Result, Error> {
         try requireVocabularyAdmission(nil)
-        let (stream, newContinuation, run) = try admitDictationTranscription()
+        let admission = try admitDictationTranscription()
+        let stream = admission.stream
+        let newContinuation = admission.continuation
+        let run = admission.run
         let preparation = Task { @MainActor in
             try await self.configureCustomVocabulary(customVocabulary, liveRun: run)
             try self.requireCurrentLiveTranscription(run)

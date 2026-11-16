@@ -91,7 +91,7 @@ extension FileTranscriptionTests {
                 preparePipeline: { run in
                     run.recognizerTask = Task { @MainActor in
                         await results.wait()
-                        fixture.session.retireFileTranscription(run, error: nil)
+                        fixture.session.completeFileResults(run)
                     }
                 },
                 ingest: {

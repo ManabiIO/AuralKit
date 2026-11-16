@@ -2,8 +2,6 @@ import Foundation
 import AVFoundation
 import Speech
 
-// swiftlint:disable file_length
-
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
