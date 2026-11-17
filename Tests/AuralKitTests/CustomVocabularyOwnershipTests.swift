@@ -80,24 +80,25 @@ struct CustomVocabularyOwnershipTests {
         }
     }
 
-    @Test("A compilation admitted while idle cannot publish into a newly preparing stream")
+    @Test("Outstanding standalone compilation keeps transcription admission closed")
     @MainActor
-    func suspendedConfigurationRechecksAdmission() async throws {
+    func suspendedConfigurationKeepsStartClosed() async throws {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFixture { fixture in
             let task = fixture.configure("old")
             try await fixture.waitForCompilation("old")
-            fixture.startPlainDictation()
-            try await fixture.waitUntil { fixture.authorizationEntered }
+            let rejected = fixture.session.startDictationTranscribing()
+            await #expect(throws: SpeechSessionError.self) {
+                for try await _ in rejected { }
+            }
+            #expect(!fixture.authorizationEntered)
             await fixture.compiler.release("old")
             await task.value
-            #expect(fixture.errors.count == 1)
-            if let error = fixture.errors.first as? SpeechSessionError {
-                if case .customVocabularyRequiresIdleSession = error {} else {
-                    Issue.record("Expected idle-session error, got \(error)")
-                }
-            } else { Issue.record("Expected idle-session error") }
-            #expect(fixture.session.customVocabularyDescriptor == nil)
+            #expect(fixture.errors.isEmpty)
+            #expect(fixture.session.customVocabularyDescriptor == fixture.descriptor("old"))
+            #expect(fixture.session.canStartTranscription)
+            fixture.startPlainDictation()
+            try await fixture.waitUntil { fixture.authorizationEntered }
             #expect(fixture.session.status == .preparing)
         }
     }

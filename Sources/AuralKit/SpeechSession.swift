@@ -29,8 +29,8 @@ import Speech
 /// }
 /// ```
 ///
-/// Call `stopTranscribing()` to end capture and unwind the stream. The same instance may be reused
-/// for subsequent transcription sessions.
+/// Call `finishTranscribing()` to end capture and receive final results, or `cancelTranscribing()`
+/// to discard pending work. The same instance may be reused after either operation returns.
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 public final class SpeechSession {
@@ -51,6 +51,7 @@ public final class SpeechSession {
     let attributeOptions: Set<SpeechTranscriber.ResultAttributeOption>
     let inputProviderPreference: InputProviderPreference
     let analyzerConfiguration: AnalyzerConfiguration
+    let audioSessionOwnership: AudioSessionOwnership
 
     var statusContinuations: [UUID: AsyncStream<Status>.Continuation] = [:]
 
@@ -106,6 +107,7 @@ public final class SpeechSession {
     var liveTranscriptionHooks: LiveTranscriptionHooks?
     var fileTranscription: FileTranscriptionRun?
     var fileTranscriptionHooks: FileTranscriptionHooks?
+    var customVocabularyPreparationCount = 0
     var streamingMode: StreamingMode = .inactive
 
     // Notification Handling
@@ -129,13 +131,15 @@ public final class SpeechSession {
     ///     Defaults to `.volatileResults` (partial results) and `.alternativeTranscriptions`.
     ///   - attributeOptions: Options controlling what metadata is included with results when no preset is provided.
     ///     Defaults to `.audioTimeRange` (timing info) and `.transcriptionConfidence`.
+    ///   - audioSessionOwnership: Use `.external` when the host manages AVAudioSession.
     public init(
         locale: Locale = .current,
         preset: SpeechTranscriber.Preset? = nil,
         reportingOptions: Set<SpeechTranscriber.ReportingOption> = defaultReportingOptions,
         attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
         inputProviderPreference: InputProviderPreference = .automatic,
-        analyzerConfiguration: AnalyzerConfiguration = .default
+        analyzerConfiguration: AnalyzerConfiguration = .default,
+        audioSessionOwnership: AudioSessionOwnership = .managed
     ) {
         self.locale = locale
         self.preset = preset
@@ -143,6 +147,7 @@ public final class SpeechSession {
         self.attributeOptions = attributeOptions
         self.inputProviderPreference = inputProviderPreference
         self.analyzerConfiguration = analyzerConfiguration
+        self.audioSessionOwnership = audioSessionOwnership
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS)
         self.audioConfig = AudioSessionConfiguration.default
@@ -165,6 +170,7 @@ public final class SpeechSession {
     ///   - attributeOptions: Options controlling what metadata is included with results when no preset is provided.
     ///     Defaults to `.audioTimeRange` (timing info) and `.transcriptionConfidence`.
     ///   - audioConfig: Audio session configuration for iOS. Controls category, mode, and options.
+    ///     Ignored when `audioSessionOwnership` is `.external`.
     public init(
         locale: Locale = .current,
         preset: SpeechTranscriber.Preset? = nil,
@@ -172,7 +178,8 @@ public final class SpeechSession {
         attributeOptions: Set<SpeechTranscriber.ResultAttributeOption> = defaultAttributeOptions,
         audioConfig: AudioSessionConfiguration = .default,
         inputProviderPreference: InputProviderPreference = .automatic,
-        analyzerConfiguration: AnalyzerConfiguration = .default
+        analyzerConfiguration: AnalyzerConfiguration = .default,
+        audioSessionOwnership: AudioSessionOwnership = .managed
     ) {
         self.locale = locale
         self.preset = preset
@@ -180,6 +187,7 @@ public final class SpeechSession {
         self.attributeOptions = attributeOptions
         self.inputProviderPreference = inputProviderPreference
         self.analyzerConfiguration = analyzerConfiguration
+        self.audioSessionOwnership = audioSessionOwnership
         self.audioConfig = audioConfig
         self.customVocabularyCompiler = CustomVocabularyCompiler()
 #if os(iOS) || os(macOS)
@@ -303,8 +311,7 @@ public final class SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }

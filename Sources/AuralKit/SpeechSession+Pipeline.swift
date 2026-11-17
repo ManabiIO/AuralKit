@@ -83,7 +83,7 @@ extension SpeechSession {
         await startLivePipeline(run: run, kind: .speech) {
             let transcriber = try await self.setUpSpeechTranscriber(
                 contextualStrings: contextualStrings,
-                startAnalyzerImmediately: !self.shouldUseNativeCaptureInputProvider
+                startAnalyzerImmediately: run.externalInput != nil || !self.shouldUseNativeCaptureInputProvider
             )
             try self.requireCurrentLiveTranscription(run)
             return self.makeLiveRecognizerTask(
@@ -100,7 +100,7 @@ extension SpeechSession {
         await startLivePipeline(run: run, kind: .dictation) {
             let prepared = try await self.setUpDictationTranscriber(
                 contextualStrings: contextualStrings,
-                startAnalyzerImmediately: !self.shouldUseNativeCaptureInputProvider
+                startAnalyzerImmediately: run.externalInput != nil || !self.shouldUseNativeCaptureInputProvider
             )
             try self.requireCurrentLiveTranscription(run)
             return self.makeLiveRecognizerTask(
@@ -119,6 +119,8 @@ extension SpeechSession {
             try requireCurrentLiveTranscription(run)
             if let authorize = liveTranscriptionHooks?.authorize {
                 try await authorize()
+            } else if run.externalInput != nil {
+                try await ensureSpeechRecognitionAuthorization(context: "for external audio")
             } else {
                 try await ensurePermissions()
             }
@@ -126,21 +128,24 @@ extension SpeechSession {
             if let preparePipeline = liveTranscriptionHooks?.preparePipeline {
                 try await preparePipeline(run, kind)
             } else {
-                try await setupAudioSession(liveRun: run)
+                if run.externalInput == nil { try await setupAudioSession(liveRun: run) }
                 try requireCurrentLiveTranscription(run)
-                run.usesNativeInput = self.shouldUseNativeCaptureInputProvider
+                run.usesNativeInput = run.externalInput != nil || self.shouldUseNativeCaptureInputProvider
                 run.recognizerTask = try await prepareRecognizer()
             }
             try requireCurrentLiveTranscription(run)
             recognizerTask = run.recognizerTask
-            if let startAudio = liveTranscriptionHooks?.startAudio {
+            if run.externalInput != nil {
+                try bindExternalAudio(run)
+            } else if let startAudio = liveTranscriptionHooks?.startAudio {
                 try startAudio()
             } else if !(try await setUpNativeCaptureStreamingIfAvailable(run: run)) {
                 try requireCurrentLiveTranscription(run)
                 try startAudioStreaming()
             }
             try requireCurrentLiveTranscription(run)
-            streamingMode = .liveMicrophone
+            streamingMode = run.externalInput == nil ? .liveMicrophone : .externalAudio
+            run.ready = true
             activeResultKind = kind
             setStatus(.transcribing)
         } catch {
@@ -179,6 +184,7 @@ extension SpeechSession {
         screenCaptureAnalysisFinalizer = nil
         let detached = detachTranscriberState()
         await stopScreenCaptureStreamingIfNeeded()
+        if cancelRecognizer { await liveTranscriptionHooks?.cancelAnalyzer?() }
         await cleanUpDetachedTranscriberState(detached, cancelAnalyzer: cancelRecognizer)
         await analysisFinalizer?()
         // Finalization wakes native analysis before joining it. Keep model leases
@@ -235,6 +241,12 @@ extension SpeechSession {
     // MARK: - Helper Methods
 
     func setupAudioSession(liveRun: LiveTranscriptionRun? = nil) async throws {
+        if let liveRun { try requireCurrentLiveTranscription(liveRun) }
+        guard audioSessionOwnership == .managed, liveRun?.externalInput == nil else { return }
+        if let configure = liveTranscriptionHooks?.configureAudioSession {
+            try configure()
+            return
+        }
 #if os(iOS)
         try await MainActor.run {
             if let liveRun { try requireCurrentLiveTranscription(liveRun) }
@@ -256,7 +268,7 @@ extension SpeechSession {
 
 #if os(iOS)
     private func deactivateAudioSessionIfNeeded() {
-        guard isAudioSessionActive else { return }
+        guard audioSessionOwnership == .managed, isAudioSessionActive else { return }
         do {
             let audioSession = AVAudioSession.sharedInstance()
             try audioSession.setActive(false, options: [.notifyOthersOnDeactivation])

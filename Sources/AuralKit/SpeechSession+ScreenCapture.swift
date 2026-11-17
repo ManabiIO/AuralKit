@@ -43,7 +43,9 @@ extension SpeechSession {
             }
         }
         if let error = captureFailure ?? terminalFailure {
-            await retireLiveTranscription(run, error: error)?.value
+            // Public resume owns the join; this internal operation may itself
+            // be a child that terminal cleanup must join.
+            if !run.finishing { retireLiveTranscription(run, error: error) }
             throw error
         }
     }
@@ -101,8 +103,7 @@ public extension SpeechSession {
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
 
-        guard fileTranscription == nil, liveTranscription == nil, continuation == nil,
-              recognizerTask == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
@@ -184,6 +185,7 @@ extension SpeechSession {
             try requireCurrentLiveTranscription(run)
 
             streamingMode = .screenCapture
+            run.ready = true
             setStatus(.transcribing)
             activeResultKind = .speech
             if Self.shouldLog(.info) {
@@ -335,7 +337,6 @@ final class ScreenCaptureAudioInputProvider: NSObject, ScreenCaptureInput, SCStr
     private let stopErrors = ScreenCaptureStopErrors()
 
     @MainActor private let transitions: ScreenCaptureTransitions
-    @MainActor private var terminalCleanupTask: Task<Void, Never>?
     @MainActor private var captureTasks: [UUID: Task<Void, Never>] = [:]
     private let presentPicker: @MainActor (ScreenCaptureAudioInputProvider) -> Void
     private let dismissPicker: @MainActor (any SCContentSharingPickerObserver) -> Void
@@ -409,9 +410,9 @@ final class ScreenCaptureAudioInputProvider: NSObject, ScreenCaptureInput, SCStr
 
     @MainActor
     func resume(onCompletion: @escaping @MainActor (Result<Void, Error>) -> Void) async -> Error? {
-        let failure = await transitions.resume(onCompletion: onCompletion).value
-        if failure != nil { await terminalCleanupTask?.value }
-        return failure
+        // Session control is now an owned child. Return its failure before the
+        // public caller joins terminal cleanup, which must itself join this child.
+        await transitions.resume(onCompletion: onCompletion).value
     }
 
     @MainActor
@@ -581,7 +582,7 @@ final class ScreenCaptureAudioInputProvider: NSObject, ScreenCaptureInput, SCStr
         let isCurrent = transitions.didStop(stream, error: failure)
         guard !stopped, isCurrent else { return }
         stopped = true
-        terminalCleanupTask = onTermination(failure)
+        _ = onTermination(failure)
     }
 
     private static func isUserStop(_ error: Error) -> Bool {

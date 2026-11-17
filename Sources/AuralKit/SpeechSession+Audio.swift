@@ -182,6 +182,7 @@ extension SpeechSession {
     }
 
     func handleAudioSessionInterruption(typeValue: UInt?, optionsValue: UInt?) async {
+        guard audioSessionOwnership == .managed else { return }
         guard let typeValue,
               let type = AVAudioSession.InterruptionType(rawValue: typeValue) else {
             return

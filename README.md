@@ -68,10 +68,10 @@ import AuralKit
 // Create a speech session with your preferred locale
 let session = SpeechSession(locale: .current)
 
+// Register startup before scheduling its result consumer.
+let stream = session.startTranscribing()
 let streamTask = Task {
     do {
-        // Start the async stream
-        let stream = session.startTranscribing()
         for try await result in stream {
             if result.isFinal {
                 print("Final: \(result.text)")
@@ -119,12 +119,11 @@ import AuralKit
 let session = SpeechSession()
 
 // Or specify a locale
-let session = SpeechSession(locale: Locale(identifier: "es-ES"))
+// let session = SpeechSession(locale: Locale(identifier: "es-ES"))
 
+let stream = session.startTranscribing()
 let streamTask = Task {
     do {
-        // Start transcribing
-        let stream = session.startTranscribing()
         for try await result in stream {
             let attributedText = result.text
 
@@ -161,6 +160,59 @@ Finish closes the stream without starting capture.
 Use `cancelTranscribing()` to abandon a run. The stream ends with `CancellationError`, including
 when using the one-shot file API. The stream may still contain results already yielded before
 cancellation. Clear any displayed partial text and handle cancellation separately from errors.
+
+### Awaited startup and vocabulary admission
+
+The async external-input and custom-vocabulary start overloads return after the
+actual pipeline is ready. Startup failure or cancellation joins the run's teardown
+before throwing. A quickly completed result stream still retains its successful
+startup receipt. Finish during preparation closes the unready run without capture.
+
+Standalone vocabulary preparation blocks transcription starts until every admitted
+compiler has returned. Existing clear/replacement configuration requests may still
+supersede older compilation; rejected outputs retain their private artifact owner
+through the join and are then released. Cancel the configuring task to abandon it.
+
+### Host-owned audio
+
+If AuralKit should capture the microphone but your application manages the shared
+audio session, initialize with `audioSessionOwnership: .external`. Configure and
+activate the session before starting. AuralKit will not change its category, activate
+or deactivate it, or automatically recover it after interruptions. The host should
+coordinate `pauseTranscribing()` and `resumeTranscribing()` with its session owner.
+This mode uses the AVAudioEngine path to avoid AVCaptureSession's independent audio
+session configuration.
+
+When the application already has a capture engine, feed that engine's buffers:
+
+```swift
+let session = SpeechSession(locale: .current)
+let input = ExternalAudioInput()
+let results = try await session.startTranscribing(externalAudio: input)
+let consumer = Task {
+    for try await result in results {
+        // Handle final and volatile results as usual.
+        print(result.text)
+    }
+}
+
+// In the host's existing audio callback, in capture order:
+// try input.append(buffer)
+
+// On Finish, the host can keep its capture engine running for other consumers.
+await session.finishTranscribing()
+try await consumer.value
+```
+
+The external-start overload returns only once the input is ready. It requests speech
+recognition authorization, but does not request microphone permission, start capture,
+or configure/activate an audio session, regardless of `audioSessionOwnership`. The
+host owns those responsibilities. `append` converts buffers to the analyzer format
+and copies passthrough buffers synchronously so capture buffers may be reused after
+it returns. Handle thrown conversion errors in the host callback. It returns `false`
+after the input has closed; a closed handle cannot feed a replacement transcription.
+Create a new `ExternalAudioInput` for every start. A dictation/custom-vocabulary
+overload is also available: `startDictationTranscribing(externalAudio:)`.
 
 ## Demo App
 

@@ -38,6 +38,7 @@ class TranscriptionManager {
     var micInput: AudioInputInfo?
 
     private var transcriptionTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
     private var statusTask: Task<Void, Never>?
     private var audioInputTask: Task<Void, Never>?
     private var speechDetectorTask: Task<Void, Never>?
@@ -58,7 +59,8 @@ class TranscriptionManager {
     }
 
     func startTranscription() {
-        guard status == .idle else { return }
+        guard status == .idle, transcriptionTask == nil, stopTask == nil else { return }
+        status = .preparing
 
         error = nil
         volatileText = ""
@@ -73,15 +75,20 @@ class TranscriptionManager {
         observeAudioInput(from: session)
         applyVoiceActivationConfiguration(to: session)
 
+        let stream = session.startTranscribing()
         transcriptionTask = Task { @MainActor in
             do {
-                for try await result in session.startTranscribing() {
+                for try await result in stream {
+                    guard self.speechSession === session else { return }
                     self.handleTranscriptionResult(result)
                 }
+                guard self.speechSession === session else { return }
                 self.finishSession(locale: sessionLocale)
             } catch is CancellationError {
+                guard self.speechSession === session else { return }
                 self.cleanupSession()
             } catch {
+                guard self.speechSession === session else { return }
                 self.error = error.localizedDescription
                 self.finishSession(locale: sessionLocale)
             }
@@ -93,44 +100,33 @@ class TranscriptionManager {
         statusTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for await newStatus in session.statusStream {
+                guard self.speechSession === session else { return }
+                guard newStatus == session.status, self.stopTask == nil else { continue }
+                // The reader may still be draining final results after native
+                // cleanup reports idle. Its completion owns UI readiness.
+                if newStatus == .idle, self.transcriptionTask != nil { continue }
                 self.status = newStatus
             }
         }
     }
 
-    private func handleTranscriptionResult(_ result: SpeechTranscriber.Result) {
-        result.apply(
-            to: &finalizedText,
-            partialText: &volatileText,
-            partialStyler: { $0.foregroundColor = Color.purple.opacity(0.4) }
-        )
+    func finishTranscription() { endTranscription(cancel: false) }
 
-        currentTimeRange = ""
-        result.text.runs.forEach { run in
-            if let audioRange = run.audioTimeRange {
-                let start = formatTime(audioRange.start)
-                let end = formatTime(audioRange.end)
-                currentTimeRange = "\(start) - \(end)"
-            }
+    func cancelTranscription() { endTranscription(cancel: true) }
+
+    private func endTranscription(cancel: Bool) {
+        guard let session = speechSession else { return }
+        if stopTask != nil {
+            if cancel { transcriptionTask?.cancel() }
+            return
         }
-    }
-
-    private func formatTime(_ time: CMTime) -> String {
-        let seconds = time.seconds
-        let minutes = Int(seconds / 60)
-        let remainingSeconds = Int(seconds.truncatingRemainder(dividingBy: 60))
-        let milliseconds = Int((seconds.truncatingRemainder(dividingBy: 1)) * 100)
-        return String(format: "%d:%02d.%02d", minutes, remainingSeconds, milliseconds)
-    }
-
-    func finishTranscription() {
-        guard let speechSession else { return }
-        Task { await speechSession.finishTranscribing() }
-    }
-
-    func cancelTranscription() {
-        guard let speechSession else { return }
-        Task { await speechSession.cancelTranscribing() }
+        let reader = transcriptionTask
+        status = .stopping
+        stopTask = Task { @MainActor in
+            if cancel { await session.cancelTranscribing() } else { await session.finishTranscribing() }
+            await reader?.value
+            self.stopTask = nil
+        }
     }
 
     func pauseTranscription() {
@@ -280,6 +276,33 @@ class TranscriptionManager {
         }
 
         applyVoiceActivationConfiguration(to: session)
+    }
+}
+
+extension TranscriptionManager {
+    private func handleTranscriptionResult(_ result: SpeechTranscriber.Result) {
+        result.apply(
+            to: &finalizedText,
+            partialText: &volatileText,
+            partialStyler: { $0.foregroundColor = Color.purple.opacity(0.4) }
+        )
+
+        currentTimeRange = ""
+        result.text.runs.forEach { run in
+            if let audioRange = run.audioTimeRange {
+                let start = formatTime(audioRange.start)
+                let end = formatTime(audioRange.end)
+                currentTimeRange = "\(start) - \(end)"
+            }
+        }
+    }
+
+    private func formatTime(_ time: CMTime) -> String {
+        let seconds = time.seconds
+        let minutes = Int(seconds / 60)
+        let remainingSeconds = Int(seconds.truncatingRemainder(dividingBy: 60))
+        let milliseconds = Int((seconds.truncatingRemainder(dividingBy: 1)) * 100)
+        return String(format: "%d:%02d.%02d", minutes, remainingSeconds, milliseconds)
     }
 }
 
