@@ -2,10 +2,10 @@ import Foundation
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 extension UpstreamCustomVocabularyOwnershipTests {
     @Test("Already-cancelled configuration leaves the pending request intact")
     func cancelledRequestDoesNotSupersede() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         let session = session(preparation)
         let pending = Task { @MainActor in
@@ -31,6 +31,7 @@ extension UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Caller cancellation takes precedence over a joined compiler failure")
     func cancellationAfterCompilerFailure() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession(locale: Locale(identifier: "en_US"))
         let compiler = CancellingVocabularyCompiler()
         session.customVocabularyCompiler = compiler
@@ -52,6 +53,7 @@ extension UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Purged files are rebuilt before configuration reuse or dictation", arguments: Reuse.allCases)
     func purgedFilesAreRebuilt(reuse: Reuse) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         let session = session(preparation)
         try await session.configureCustomVocabulary(descriptor())

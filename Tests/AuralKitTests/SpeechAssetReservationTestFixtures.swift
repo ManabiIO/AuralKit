@@ -3,7 +3,7 @@ import AVFoundation
 import Speech
 @testable import AuralKit
 
-actor AssetGate {
+actor UpstreamAssetGate {
     private var entered = false
     private var arrivals: [CheckedContinuation<Void, Never>] = []
     private var isOpen = false
@@ -39,7 +39,7 @@ actor AssetGate {
 }
 
 @available(iOS 26.0, macOS 26.0, *)
-actor AssetInventoryProbe {
+actor UpstreamAssetInventoryProbe {
     struct Snapshot: Sendable {
         let locales: Set<String>
         let reserves: [String]
@@ -50,8 +50,8 @@ actor AssetInventoryProbe {
     private let variants: [String: Locale]
     private var reserveCalls: [String] = []
     private var releaseCalls: [String] = []
-    private var reserveGate: AssetGate?
-    private var releaseGate: AssetGate?
+    private var reserveGate: UpstreamAssetGate?
+    private var releaseGate: UpstreamAssetGate?
 
     init(initial: [Locale] = [], variants: [String: Locale] = [:]) {
         stored = Dictionary(initial.map { ($0.identifier(.bcp47), $0) },
@@ -69,8 +69,8 @@ actor AssetInventoryProbe {
         Snapshot(locales: Set(stored.keys), reserves: reserveCalls, releases: releaseCalls)
     }
 
-    func holdReserve(at gate: AssetGate) { reserveGate = gate }
-    func holdRelease(at gate: AssetGate) { releaseGate = gate }
+    func holdReserve(at gate: UpstreamAssetGate) { reserveGate = gate }
+    func holdRelease(at gate: UpstreamAssetGate) { releaseGate = gate }
     private func locales() -> [Locale] { Array(stored.values) }
 
     private func reserve(_ locale: Locale) async -> Bool {

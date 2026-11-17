@@ -49,7 +49,7 @@ extension SpeechSession {
                 throw SpeechSessionError.invalidAudioDataType
             }
             let bufferSize = AVAudioFrameCount((inputFormat.sampleRate / 10).rounded(.up))
-            let processBuffer = makeAudioTapHandler(ownsTapBuffer: true)
+            let processBuffer = try makeAudioTapHandler(ownsTapBuffer: true)
             try inputNode.installAudioTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, _ in
                 guard buffer.frameLength > 0 else { return }
                 processBuffer(AVAudioPCMBuffer(copying: buffer))
@@ -57,17 +57,21 @@ extension SpeechSession {
             return
         }
 #endif
-        let processBuffer = makeAudioTapHandler()
+        let processBuffer = try makeAudioTapHandler()
         inputNode.installTap(onBus: 0, bufferSize: Self.microphoneTapBufferSize, format: inputFormat) { buffer, _ in
             processBuffer(buffer)
         }
     }
 
     func stopAudioStreaming() {
-        guard isAudioStreaming else { return }
+        guard isAudioStreaming else {
+            closeMicrophoneInput()
+            return
+        }
 
 #if swift(>=6.4)
         if #available(iOS 27.0, macOS 27.0, *), stopPreparedNativeCaptureStreaming() {
+            closeMicrophoneInput()
             return
         }
 #endif
@@ -76,6 +80,8 @@ extension SpeechSession {
             Self.logger.debug("Stopping audio streaming")
         }
         audioEngine.stop()
+        closeMicrophoneInput()
+        audioEngine.inputNode.removeTap(onBus: 0)
         isAudioStreaming = false
     }
 
@@ -126,26 +132,31 @@ extension SpeechSession {
 #endif
     }
 
-    private func makeAudioTapHandler(ownsTapBuffer: Bool = false) -> @Sendable (AVAudioPCMBuffer) -> Void {
-        let run = liveTranscription
-        return { [weak self, weak run] buffer in
-            let bufferCopy: AVAudioPCMBuffer
-            if ownsTapBuffer {
-                bufferCopy = buffer
-            } else if let copy = buffer.copy() as? AVAudioPCMBuffer {
-                bufferCopy = copy
-            } else {
-                if Self.shouldLog(.error) {
-                    Self.logger.error("Failed to copy audio buffer for processing.")
+    private func makeAudioTapHandler(
+        ownsTapBuffer: Bool = false
+    ) throws -> @Sendable (AVAudioPCMBuffer) -> Void {
+        guard let inputBuilder, let analyzerFormat else { throw SpeechSessionError.invalidAudioDataType }
+        guard let run = liveTranscription, !run.retired, !run.finishing else { throw CancellationError() }
+        run.microphoneInput?.close()
+        let ingress = MicrophoneAudioIngress(
+            format: analyzerFormat,
+            deliver: { inputBuilder.yield(AnalyzerInput(buffer: $0)) },
+            onError: { error in
+                let description = error.localizedDescription
+                Task { @MainActor in
+                    if Self.shouldLog(.error) {
+                        Self.logger.error("Audio processing error: \(description, privacy: .public)")
+                    }
                 }
-                return
             }
-            let sendableBuffer = SendablePCMBuffer(buffer: bufferCopy)
-            Task { @MainActor [weak self, weak run] in
-                guard let self, let run else { return }
-                self.enqueueLiveAudioBuffer(sendableBuffer, run: run)
-            }
-        }
+        )
+        run.microphoneInput = ingress
+        return { buffer in ingress.receive(buffer, ownsBuffer: ownsTapBuffer) }
+    }
+
+    private func closeMicrophoneInput() {
+        liveTranscription?.microphoneInput?.close()
+        liveTranscription?.microphoneInput = nil
     }
 
 #if os(iOS)

@@ -3,14 +3,15 @@ import Speech
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("Custom vocabulary artifact retention")
 @MainActor
 struct UpstreamCustomVocabularyOwnershipTests {
+    @available(iOS 26.0, macOS 26.0, *)
     func descriptor(_ version: String = "1") -> SpeechSession.CustomVocabulary {
         .init(locale: Locale(identifier: "en_US"), identifier: "ownership-test", version: version, weight: 0.4)
     }
 
+    @available(iOS 26.0, macOS 26.0, *)
     func session(_ preparation: VocabularyPreparation) -> SpeechSession {
         let session = SpeechSession(locale: Locale(identifier: "en_US"))
         session.customVocabularyCompiler = CustomVocabularyCompiler { descriptor, asset, configuration in
@@ -21,6 +22,7 @@ struct UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Equal descriptors have private production outputs and independent retirement")
     func twoSessionsRetireIndependently() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         var first: SpeechSession? = session(preparation)
         var second: SpeechSession? = session(preparation)
@@ -61,6 +63,7 @@ struct UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Pending compilation cannot publish after clear, replacement or cancellation", arguments: Rejection.allCases)
     func rejectedCompilationRetires(rejection: Rejection) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         let session = session(preparation)
         let request = Task { @MainActor in
@@ -103,6 +106,7 @@ struct UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Failed preparation removes partial production output")
     func failedCompilationRetires() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         let session = session(preparation)
         do {
@@ -116,6 +120,7 @@ struct UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Detached transcriber state retains files after session retirement")
     func detachedStateRetainsArtifacts() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         var owner: SpeechSession? = session(preparation)
         defer { owner = nil }
@@ -135,6 +140,7 @@ struct UpstreamCustomVocabularyOwnershipTests {
 
     @Test("Queued result consumer retains artifacts through terminal cleanup")
     func resultConsumerRetainsArtifacts() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let preparation = VocabularyPreparation()
         var owner: SpeechSession? = session(preparation)
         defer { owner = nil }

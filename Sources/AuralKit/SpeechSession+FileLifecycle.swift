@@ -97,6 +97,7 @@ extension SpeechSession {
                     try self.requireCurrentFileTranscription(run)
                     streamContinuation.yield(result)
                 }
+                try Task.checkCancellation()
                 if Self.shouldLog(.notice) {
                     Self.logger.notice("File recognizer task completed without error")
                 }

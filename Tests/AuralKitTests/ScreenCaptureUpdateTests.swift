@@ -4,7 +4,6 @@ import Speech
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("Screen capture updates and termination")
 struct ScreenCaptureUpdateTests {
     @Test("Terminal errors reach a pending resume unless explicit stop won", arguments: [false, true])

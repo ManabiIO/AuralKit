@@ -258,7 +258,6 @@ extension SpeechSession {
 
 }
 
-
 @available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
     typealias FileResultContinuation = AsyncThrowingStream<SpeechTranscriber.Result, Error>.Continuation

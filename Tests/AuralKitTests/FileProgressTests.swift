@@ -2,12 +2,12 @@ import Speech
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("File transcription progress")
 struct FileProgressTests {
     @Test("Progress stops with its file session", arguments: ["stopping", "stopped", "replacement", "cancelled"])
     @MainActor
     func progressStopsWithItsFileSession(termination: String) async {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
         let run = FileTranscriptionRun()
         session.fileTranscription = run

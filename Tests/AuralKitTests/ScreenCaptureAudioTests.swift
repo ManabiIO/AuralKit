@@ -5,7 +5,6 @@ import Speech
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 struct ScreenCaptureAudioTests {
     @Test(arguments: [true, false])
     func conversionKeepsOneTimelineAcrossCaptureStreams(drain: Bool) async throws {
@@ -64,6 +63,7 @@ struct ScreenCaptureAudioTests {
         withExtendedLifetime((firstStream, secondStream)) {}
     }
 
+    @available(iOS 27.0, macOS 27.0, *)
     private func makeSample(format: AVAudioFormat, frames: Int, timestamp: Int64) throws -> CMSampleBuffer {
         let byteCount = frames * Int(format.streamDescription.pointee.mBytesPerFrame)
         var data: CMBlockBuffer?

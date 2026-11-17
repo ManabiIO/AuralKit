@@ -170,10 +170,10 @@ struct FileTranscriptionTests {
         #expect(session.status == .idle)
     }
 
-    @available(iOS 27.0, macOS 27.0, *)
     @Test("Media transcription rejects an unknown audio track without falling back")
     @MainActor
     func mediaTranscriptionRejectsUnknownTrack() async throws {
+        guard #available(iOS 27.0, macOS 27.0, *) else { return }
         let url = try createSilenceAudioFile(duration: 2.0)
         defer { try? FileManager.default.removeItem(at: url) }
         let asset = AVURLAsset(url: url)

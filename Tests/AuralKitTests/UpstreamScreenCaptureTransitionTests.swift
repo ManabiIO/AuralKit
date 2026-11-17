@@ -186,6 +186,7 @@ struct UpstreamScreenCaptureTransitionTests {
     @Test("A terminal stop receives a drain failure from an in-flight pause")
     @MainActor
     func stopReceivesDrainFailureFromPause() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withCaptureFixture { fixture in
             let transitions = ScreenCaptureTransitions()
             let stream = ControlledCaptureStream()

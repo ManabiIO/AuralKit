@@ -6,6 +6,10 @@ import Speech
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 final class LiveTranscriptionRun {
+    var microphoneInput: MicrophoneAudioIngress?
+    var usesNativeInput = false
+    var inputCompleted = false
+    var resultsCompleted = false
     var inputTask: Task<Void, Never>?
     var setupTask: Task<Void, Never>?
     var recognizerTask: Task<Void, Never>?
@@ -55,11 +59,26 @@ extension SpeechSession {
                     try self.requireCurrentLiveTranscription(run)
                     streamContinuation.yield(result)
                 }
-                self.retireLiveTranscription(run, error: nil)
+                try Task.checkCancellation()
+                self.completeLiveResults(run)
             } catch {
                 // Independent result cancellation must also settle its stream.
                 self.retireLiveTranscription(run, error: error)
             }
+        }
+    }
+
+    func completeLiveInput(_ run: LiveTranscriptionRun) {
+        guard liveTranscription === run, !run.retired else { return }
+        run.inputCompleted = true
+        if run.resultsCompleted { retireLiveTranscription(run, error: nil) }
+    }
+
+    private func completeLiveResults(_ run: LiveTranscriptionRun) {
+        guard liveTranscription === run, !run.retired else { return }
+        run.resultsCompleted = true
+        if !run.usesNativeInput || run.inputCompleted {
+            retireLiveTranscription(run, error: nil)
         }
     }
 

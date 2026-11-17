@@ -79,6 +79,7 @@ final class ScreenCaptureAudioProcessor: @unchecked Sendable {
     }
 }
 
+@available(iOS 26.0, macOS 26.0, *)
 private protocol ScreenCaptureAudioConversion {
     func convert(_ sample: CMSampleBuffer, format: AVAudioFormat) throws -> [AnalyzerInput]
     func flush() throws -> [AnalyzerInput]

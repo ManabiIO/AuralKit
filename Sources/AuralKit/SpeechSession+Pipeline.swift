@@ -128,6 +128,7 @@ extension SpeechSession {
             } else {
                 try await setupAudioSession(liveRun: run)
                 try requireCurrentLiveTranscription(run)
+                run.usesNativeInput = self.shouldUseNativeCaptureInputProvider
                 run.recognizerTask = try await prepareRecognizer()
             }
             try requireCurrentLiveTranscription(run)

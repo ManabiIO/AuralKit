@@ -190,8 +190,7 @@ struct LiveTranscriptionTests {
             let results = try #require(fixture.resultContinuations.last)
             results.yield("one")
             try await fixture.waitUntil { fixture.values == ["one"] }
-            if cancelled { results.finish(throwing: CancellationError()) }
-            else { results.finish() }
+            if cancelled { results.finish(throwing: CancellationError()) } else { results.finish() }
             try await fixture.waitUntil { fixture.session.liveTranscription == nil }
             await fixture.publicConsumers.last?.value
             #expect(fixture.session.status == .idle)
@@ -205,8 +204,7 @@ struct LiveTranscriptionTests {
     @available(iOS 26.0, macOS 26.0, *)
     private func withFixture(_ operation: @MainActor (LiveFixture) async throws -> Void) async throws {
         let fixture = LiveFixture()
-        do { try await operation(fixture) }
-        catch { await fixture.cleanup(); throw error }
+        do { try await operation(fixture) } catch { await fixture.cleanup(); throw error }
         await fixture.cleanup()
     }
 }
@@ -331,8 +329,7 @@ private final class LiveFixture {
                     run: run, results: results, streamContinuation: continuation
                 )
                 _ = task {
-                    do { for try await value in output { self.values.append(value) } }
-                    catch {}
+                    do { for try await value in output { self.values.append(value) } } catch {}
                 }
             },
             startAudio: { [unowned self] in starts += 1 }
@@ -344,14 +341,12 @@ private final class LiveFixture {
         if dictation {
             let stream = session.startDictationTranscribing()
             consumer = task {
-                do { for try await _ in stream {} }
-                catch { self.errors.append(error) }
+                do { for try await _ in stream {} } catch { self.errors.append(error) }
             }
         } else {
             let stream = session.startTranscribing()
             consumer = task {
-                do { for try await _ in stream {} }
-                catch { self.errors.append(error) }
+                do { for try await _ in stream {} } catch { self.errors.append(error) }
             }
         }
         publicConsumers.append(consumer)

@@ -5,7 +5,6 @@ import Speech
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("Finishing screen transcription")
 struct ScreenCaptureFinishTests {
     @Test("Finish drains screen input unless Cancel supersedes it", arguments: [false, true])
@@ -210,6 +209,7 @@ struct ScreenCaptureFinishTests {
     @Test("Native stop sees delegate ingress before its main actor hop", arguments: [false, true])
     @MainActor
     func nativeStopSeesDelegateIngress(nativeThrows: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let active = NSObject(), stale = NSObject()
         let activeID = ObjectIdentifier(active)
         let errors = ScreenCaptureStopErrors()
@@ -226,6 +226,7 @@ struct ScreenCaptureFinishTests {
         }
     }
 
+    @available(iOS 26.0, macOS 26.0, *)
     private func makeAnalyzerInput() throws -> AnalyzerInput {
         let format = try #require(AVAudioFormat(
             commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true

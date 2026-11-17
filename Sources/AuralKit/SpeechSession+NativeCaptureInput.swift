@@ -88,9 +88,12 @@ extension SpeechSession {
                 if let lastAudioTime {
                     try await analyzer.finalizeAndFinish(through: lastAudioTime)
                 } else {
+                    // Empty analysis has no finalizer or final results to drain.
                     self.retireLiveTranscription(run, error: nil)
+                    return
                 }
-                // Input completion is owned by the result reader, which drains final results.
+                try self.requireCurrentLiveTranscription(run)
+                self.completeLiveInput(run)
             } catch {
                 self.retireLiveTranscription(run, error: error)
             }

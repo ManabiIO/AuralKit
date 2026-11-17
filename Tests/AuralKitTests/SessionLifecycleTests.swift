@@ -370,4 +370,3 @@ extension SpeechSessionLifecycleTests {
         #expect(session.streamingMode == .inactive)
     }
 }
-

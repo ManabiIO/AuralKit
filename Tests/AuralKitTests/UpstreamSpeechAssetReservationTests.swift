@@ -2,12 +2,12 @@ import Foundation
 import Testing
 @testable import AuralKit
 
-@available(iOS 26.0, macOS 26.0, *)
 @Suite("Speech installation and borrowed reservations")
 struct UpstreamSpeechAssetReservationTests {
     @Test("overlapping managers retain the locale until the final owner stops")
     func overlappingManagers() async throws {
-        let inventory = AssetInventoryProbe()
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe()
         let reservations = SpeechAssetReservations(inventory: inventory.client)
         let first = ModelManager(reservations: reservations, assetDownloader: { _ in })
         let second = ModelManager(reservations: reservations, assetDownloader: { _ in })
@@ -26,7 +26,8 @@ struct UpstreamSpeechAssetReservationTests {
 
     @Test("borrowed external reservations survive cleanup", arguments: ["en-US", "en-AU"])
     func borrowedReservation(alias: String) async throws {
-        let inventory = AssetInventoryProbe(initial: [Locale(identifier: "en-US")],
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe(initial: [Locale(identifier: "en-US")],
                                             variants: ["en-AU": Locale(identifier: "en-US")])
         let reservations = SpeechAssetReservations(inventory: inventory.client)
         let manager = ModelManager(reservations: reservations, assetDownloader: { _ in })
@@ -38,7 +39,8 @@ struct UpstreamSpeechAssetReservationTests {
 
     @Test("variant holders protect the observed native reservation")
     func canonicalVariant() async throws {
-        let inventory = AssetInventoryProbe(variants: ["en-AU": Locale(identifier: "en-US"),
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe(variants: ["en-AU": Locale(identifier: "en-US"),
                                                       "en-GB": Locale(identifier: "en-US")])
         let reservations = SpeechAssetReservations(inventory: inventory.client)
         let owner = try await reservations.acquire(Locale(identifier: "en-AU"))
@@ -53,10 +55,11 @@ struct UpstreamSpeechAssetReservationTests {
 
     @Test("canceled or retired installation work cannot reserve a locale", arguments: [true, false])
     func canceledQueuedInstallation(cancel: Bool) async throws {
-        let inventory = AssetInventoryProbe()
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe()
         let native = inventory.client
         let reservations = SpeechAssetReservations(inventory: native)
-        let blockerGate = AssetGate()
+        let blockerGate = UpstreamAssetGate()
         let blocker = Task {
             try await reservations.withInventoryAccess { await blockerGate.wait() }
         }
@@ -97,9 +100,10 @@ struct UpstreamSpeechAssetReservationTests {
 
     @Test("implicit installation reservations cannot invalidate an explicit acquisition")
     func concurrentInstallationRequest() async throws {
-        let inventory = AssetInventoryProbe()
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe()
         let native = inventory.client
-        let gate = AssetGate()
+        let gate = UpstreamAssetGate()
         let reservations = SpeechAssetReservations(inventory: .init(
             locales: native.locales,
             reserve: { locale in
@@ -125,10 +129,11 @@ struct UpstreamSpeechAssetReservationTests {
 
     @Test("reacquisition waits for a pending native release")
     func reacquisitionDuringRelease() async throws {
-        let inventory = AssetInventoryProbe()
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        let inventory = UpstreamAssetInventoryProbe()
         let reservations = SpeechAssetReservations(inventory: inventory.client)
         let lease = try await reservations.acquire(Locale(identifier: "en-US"))
-        let gate = AssetGate()
+        let gate = UpstreamAssetGate()
         await inventory.holdRelease(at: gate)
         let release = Task { await reservations.release(lease) }
         await gate.waitForEntry()

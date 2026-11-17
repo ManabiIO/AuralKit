@@ -26,9 +26,9 @@ extension FileTranscriptionTests {
         }
     }
 
-    @Test("independent results cancellation fails the public stream, joins ingestion and permits retry")
+    @Test("independent results cancellation fails, joins ingestion and permits retry", arguments: [false, true])
     @MainActor
-    func independentFileResultsCancellationRetires() async throws {
+    func independentFileResultsCancellationRetires(throwsCancellation: Bool) async throws {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFileLifecycleFixture { fixture in
             let ingestion = fixture.gate()
@@ -47,7 +47,11 @@ extension FileTranscriptionTests {
             let consumer = fixture.transcribe()
             try await fixture.waitUntil { ingestion.entered }
             let run = try #require(fixture.session.fileTranscription)
-            analyzerResults.continuation.finish(throwing: CancellationError())
+            if throwsCancellation {
+                analyzerResults.continuation.finish(throwing: CancellationError())
+            } else {
+                run.recognizerTask?.cancel()
+            }
             try await fixture.waitUntil { run.retired }
             #expect(fixture.session.fileTranscription === run)
             ingestion.open()
@@ -214,7 +218,9 @@ extension FileTranscriptionTests {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFileLifecycleFixture { fixture in
             let file = try AVAudioFile(forReading: fixture.audioURL)
-            let format = file.processingFormat
+            let format = try #require(AVAudioFormat(
+                commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+            ))
             let declaredFrames = file.length + 1
             let inputs = AsyncStream<AnalyzerInput>.makeStream()
             defer { inputs.continuation.finish() }
