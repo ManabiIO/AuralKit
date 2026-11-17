@@ -2,8 +2,6 @@ import Foundation
 import AVFoundation
 import Speech
 
-// swiftlint:disable file_length
-
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
@@ -53,7 +51,7 @@ extension SpeechSession {
                 Self.logger.notice("Requesting speech recognition permission\(suffix)")
             }
             let granted = await withCheckedContinuation { continuation in
-                SFSpeechRecognizer.requestAuthorization { status in
+                SFSpeechRecognizer.requestAuthorization { @Sendable status in
                     continuation.resume(returning: status == .authorized)
                 }
             }
@@ -100,13 +98,14 @@ extension SpeechSession {
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async {
         await startLivePipeline(run: run, kind: .dictation) {
-            let transcriber = try await self.setUpDictationTranscriber(
+            let prepared = try await self.setUpDictationTranscriber(
                 contextualStrings: contextualStrings,
                 startAnalyzerImmediately: !self.shouldUseNativeCaptureInputProvider
             )
             try self.requireCurrentLiveTranscription(run)
             return self.makeLiveRecognizerTask(
-                run: run, results: transcriber.results, streamContinuation: streamContinuation
+                run: run, results: prepared.transcriber.results,
+                vocabularyArtifacts: prepared.artifacts, streamContinuation: streamContinuation
             )
         }
     }
@@ -129,6 +128,7 @@ extension SpeechSession {
             } else {
                 try await setupAudioSession(liveRun: run)
                 try requireCurrentLiveTranscription(run)
+                run.usesNativeInput = self.shouldUseNativeCaptureInputProvider
                 run.recognizerTask = try await prepareRecognizer()
             }
             try requireCurrentLiveTranscription(run)
@@ -145,13 +145,14 @@ extension SpeechSession {
             setStatus(.transcribing)
         } catch {
             // A producer requests retirement and returns; it never joins itself.
-            retireLiveTranscription(run, error: error)
+            finishLivePipelineSetupFailure(error, run: run)
         }
     }
 
     func cleanupPipelineResources(
         cancelRecognizer: Bool, publishIdle: Bool = true,
-        inputTask: Task<Void, Never>? = nil
+        inputTask: Task<Void, Never>? = nil,
+        finishTask: Task<Void, Never>? = nil
     ) async {
         if Self.shouldLog(.debug) {
             Self.logger.debug("Cleanup started (cancelRecognizer: \(cancelRecognizer, privacy: .public))")
@@ -178,11 +179,12 @@ extension SpeechSession {
         screenCaptureAnalysisFinalizer = nil
         let detached = detachTranscriberState()
         await stopScreenCaptureStreamingIfNeeded()
-        await finalizeDetachedTranscriberState(detached)
+        await cleanUpDetachedTranscriberState(detached, cancelAnalyzer: cancelRecognizer)
         await analysisFinalizer?()
         // Finalization wakes native analysis before joining it. Keep model leases
         // until that task can no longer use the detached analyzer.
         await inputTask?.value
+        await finishTask?.value
         await modelManager.releaseLocales()
 
         if publishIdle { setStatus(.idle) }

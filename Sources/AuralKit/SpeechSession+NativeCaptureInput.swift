@@ -62,6 +62,8 @@ extension SpeechSession {
         guard let modules = activeModules, let analyzer else {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
+        let vocabularyArtifacts = activeCustomVocabularyArtifacts
+        defer { withExtendedLifetime(vocabularyArtifacts) {} }
         guard let captureDevice = AVCaptureDevice.default(for: .audio) else {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
@@ -78,15 +80,20 @@ extension SpeechSession {
         try requireCurrentLiveTranscription(run)
 
         let analyzerInputs = provider.analyzerInputs
-        run.inputTask = Task<Void, Never> { @MainActor [self, analyzer, analyzerInputs] in
+        run.inputTask = Task<Void, Never> { @MainActor [self, analyzer, analyzerInputs, vocabularyArtifacts] in
+            defer { withExtendedLifetime(vocabularyArtifacts) {} }
             do {
                 let lastAudioTime = try await analyzer.analyzeSequence(analyzerInputs)
+                try Task.checkCancellation()
                 if let lastAudioTime {
                     try await analyzer.finalizeAndFinish(through: lastAudioTime)
                 } else {
-                    try await analyzer.finalizeAndFinishThroughEndOfInput()
+                    // Empty analysis has no finalizer or final results to drain.
+                    self.retireLiveTranscription(run, error: nil)
+                    return
                 }
-                // Input completion is owned by the result reader, which drains final results.
+                try self.requireCurrentLiveTranscription(run)
+                self.completeLiveInput(run)
             } catch {
                 self.retireLiveTranscription(run, error: error)
             }

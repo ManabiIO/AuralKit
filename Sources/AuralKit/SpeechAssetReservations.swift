@@ -1,9 +1,10 @@
 import Foundation
 import Speech
 
-/// The single owner of AuralKit's app-wide locale reservation mutations.
-/// Native inventory calls are serialized across suspension points, not merely
-/// isolated to an actor. Existing reservations are borrowed, never reclaimed.
+/// Coordinates reservation mutations made through AuralKit's shared instance.
+/// Its native inventory calls are serialized across suspension points, not merely
+/// isolated to an actor. Unrelated AssetInventory clients are outside this queue.
+/// Existing reservations are borrowed, never reclaimed.
 @available(iOS 26.0, macOS 26.0, *)
 actor SpeechAssetReservations {
     struct Inventory: Sendable {
@@ -48,7 +49,7 @@ actor SpeechAssetReservations {
     private var aliases: [String: Alias] = [:]
     private var holdings: [UUID: Holding] = [:]
     private var tail: Task<Void, Never>?
-    private var queuedOperations = 0
+    private(set) var queuedOperations = 0
 
     init(inventory: Inventory = .live) {
         self.inventory = inventory
@@ -56,17 +57,7 @@ actor SpeechAssetReservations {
 
     func acquire(_ locale: Locale) async throws -> Lease {
         try Task.checkCancellation()
-        let previous = tail
-        queuedOperations += 1
-        let operation = Task {
-            await previous?.value
-            return try await self.acquireSerially(locale)
-        }
-        tail = Task {
-            _ = await operation.result
-            self.operationFinished()
-        }
-        let lease = try await operation.value
+        let lease = try await enqueue { try await self.acquireSerially(locale) }.value
         do {
             try Task.checkCancellation()
             return lease
@@ -79,17 +70,40 @@ actor SpeechAssetReservations {
     }
 
     func release(_ lease: Lease) async {
+        _ = await enqueue { await self.releaseSerially(lease) }.result
+    }
+
+    /// Installation requests also reserve locales; their creation shares this queue.
+    /// The subsequent download must run outside it.
+    func withInventoryAccess<Value: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        let task = enqueue {
+            try Task.checkCancellation()
+            return try await operation()
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func enqueue<Value: Sendable>(
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) -> Task<Value, Error> {
         let previous = tail
         queuedOperations += 1
-        let operation = Task {
+        let task = Task {
             await previous?.value
-            await self.releaseSerially(lease)
+            return try await operation()
         }
         tail = Task {
-            await operation.value
+            _ = await task.result
             self.operationFinished()
         }
-        await operation.value
+        return task
     }
 
     private func operationFinished() {
@@ -110,6 +124,10 @@ actor SpeechAssetReservations {
         }
 
         let before = Self.index(await inventory.locales())
+        if before[alias] != nil {
+            // Preserve an exact external reservation without mutating it.
+            return admit(alias: alias, protecting: [])
+        }
         let created = try await inventory.reserve(locale)
         let after = Self.index(await inventory.locales())
         let protectedKeys: Set<String>
@@ -117,7 +135,7 @@ actor SpeechAssetReservations {
             let added = Set(after.keys).subtracting(before.keys)
             // The API returns a Bool, not the canonical asset locale. Only one
             // unambiguous new native identity establishes ownership. Preserve
-            // unknown reservations if another app client changed inventory.
+            // unknown reservations if another inventory client changed it.
             guard added.count == 1, let key = added.first, let actual = after[key] else {
                 throw ReservationError.ambiguousInventoryChange
             }

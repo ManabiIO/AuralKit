@@ -29,22 +29,7 @@ extension SpeechSession {
             throw SpeechSessionError.invalidAudioDataType
         }
 
-        audioEngine.inputNode.removeTap(onBus: 0)
-
-        let inputFormat = audioEngine.inputNode.outputFormat(forBus: 0)
-
-        if Self.shouldLog(.debug) {
-            Self.logger.debug(
-                "Installing audio tap with buffer size \(Self.microphoneTapBufferSize, privacy: .public) frames"
-            )
-        }
-
-        audioEngine.inputNode.installTap(
-            onBus: 0,
-            bufferSize: Self.microphoneTapBufferSize,
-            format: inputFormat,
-            block: makeAudioTapHandler()
-        )
+        try installMicrophoneTap()
 
         audioEngine.prepare()
         try audioEngine.start()
@@ -54,11 +39,39 @@ extension SpeechSession {
         }
     }
 
+    private func installMicrophoneTap() throws {
+        let inputNode = audioEngine.inputNode
+        inputNode.removeTap(onBus: 0)
+        let inputFormat = inputNode.outputFormat(forBus: 0)
+#if swift(>=6.4)
+        if #available(iOS 27.0, macOS 27.0, *) {
+            guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
+                throw SpeechSessionError.invalidAudioDataType
+            }
+            let bufferSize = AVAudioFrameCount((inputFormat.sampleRate / 10).rounded(.up))
+            let processBuffer = try makeAudioTapHandler(ownsTapBuffer: true)
+            try inputNode.installAudioTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { buffer, _ in
+                guard buffer.frameLength > 0 else { return }
+                processBuffer(AVAudioPCMBuffer(copying: buffer))
+            }
+            return
+        }
+#endif
+        let processBuffer = try makeAudioTapHandler()
+        inputNode.installTap(onBus: 0, bufferSize: Self.microphoneTapBufferSize, format: inputFormat) { buffer, _ in
+            processBuffer(buffer)
+        }
+    }
+
     func stopAudioStreaming() {
-        guard isAudioStreaming else { return }
+        guard isAudioStreaming else {
+            closeMicrophoneInput()
+            return
+        }
 
 #if swift(>=6.4)
         if #available(iOS 27.0, macOS 27.0, *), stopPreparedNativeCaptureStreaming() {
+            closeMicrophoneInput()
             return
         }
 #endif
@@ -67,6 +80,8 @@ extension SpeechSession {
             Self.logger.debug("Stopping audio streaming")
         }
         audioEngine.stop()
+        closeMicrophoneInput()
+        audioEngine.inputNode.removeTap(onBus: 0)
         isAudioStreaming = false
     }
 
@@ -117,22 +132,31 @@ extension SpeechSession {
 #endif
     }
 
-    private func makeAudioTapHandler() -> AVAudioNodeTapBlock {
-        let run = liveTranscription
-        return { [weak self, weak run] buffer, _ in
-            guard let bufferCopy = buffer.copy() as? AVAudioPCMBuffer else {
-                if Self.shouldLog(.error) {
-                    Self.logger.error("Failed to copy audio buffer for processing.")
+    private func makeAudioTapHandler(
+        ownsTapBuffer: Bool = false
+    ) throws -> @Sendable (AVAudioPCMBuffer) -> Void {
+        guard let inputBuilder, let analyzerFormat else { throw SpeechSessionError.invalidAudioDataType }
+        guard let run = liveTranscription, !run.retired, !run.finishing else { throw CancellationError() }
+        run.microphoneInput?.close()
+        let ingress = MicrophoneAudioIngress(
+            format: analyzerFormat,
+            deliver: { inputBuilder.yield(AnalyzerInput(buffer: $0)) },
+            onError: { error in
+                let description = error.localizedDescription
+                Task { @MainActor in
+                    if Self.shouldLog(.error) {
+                        Self.logger.error("Audio processing error: \(description, privacy: .public)")
+                    }
                 }
-                return
             }
-            let sendableBuffer = SendablePCMBuffer(buffer: bufferCopy)
+        )
+        run.microphoneInput = ingress
+        return { buffer in ingress.receive(buffer, ownsBuffer: ownsTapBuffer) }
+    }
 
-            Task { @MainActor [weak self, weak run] in
-                guard let self, let run else { return }
-                self.enqueueLiveAudioBuffer(sendableBuffer, run: run)
-            }
-        }
+    private func closeMicrophoneInput() {
+        liveTranscription?.microphoneInput?.close()
+        liveTranscription?.microphoneInput = nil
     }
 
 #if os(iOS)
@@ -194,7 +218,8 @@ extension SpeechSession {
     }
 
     private func handleInterruptionEnded(options: AVAudioSession.InterruptionOptions) async {
-        guard shouldResumeAfterInterruption, let run = liveTranscription, !run.retired else { return }
+        guard shouldResumeAfterInterruption, status == .paused,
+              let run = liveTranscription, !run.retired, !run.finishing else { return }
         shouldResumeAfterInterruption = false
 
         guard options.contains(.shouldResume) else {

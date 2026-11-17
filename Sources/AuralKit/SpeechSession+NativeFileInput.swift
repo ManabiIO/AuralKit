@@ -19,20 +19,28 @@ extension SpeechSession {
     ) async throws -> Bool {
         guard !Task.isCancelled else { return false }
 
-        guard let analyzer = await MainActor.run(body: { analyzer }) else {
-            throw SpeechSessionError.recognitionStreamSetupFailed
+        let (run, analyzer) = try await MainActor.run {
+            guard let run = fileTranscription, let analyzer else {
+                throw SpeechSessionError.recognitionStreamSetupFailed
+            }
+            try requireCurrentFileTranscription(run)
+            return (run, analyzer)
         }
 
         try await prepareAnalyzerForStartIfNeeded(in: file.processingFormat)
-        await MainActor.run {
+        try Task.checkCancellation()
+        try await MainActor.run {
+            try requireCurrentFileTranscription(run)
             startSpeechDetectorMonitoringIfNeeded()
         }
+        try Task.checkCancellation()
 
         let lastAudioTime = try await analyzer.analyzeSequence(from: file)
+        try await MainActor.run { try requireCurrentFileTranscription(run) }
         if let lastAudioTime {
             try await analyzer.finalizeAndFinish(through: lastAudioTime)
         } else {
-            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            await MainActor.run { retireFileTranscription(run, error: nil) }
         }
 
         return !Task.isCancelled

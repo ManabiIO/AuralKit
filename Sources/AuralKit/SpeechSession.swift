@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreMedia
 import Speech
 
 // MARK: - SpeechSession
@@ -69,6 +70,7 @@ public final class SpeechSession {
     var dictationTranscriber: DictationTranscriber?
     var speechDetector: SpeechDetector?
     var analyzer: SpeechAnalyzer?
+    var analyzerInputTask: Task<CMTime?, Error>?
     var activeModules: [any SpeechModule]?
     var inputSequence: AsyncStream<AnalyzerInput>?
     var inputBuilder: AsyncStream<AnalyzerInput>.Continuation?
@@ -82,6 +84,8 @@ public final class SpeechSession {
     var customVocabularyConfiguration: SFSpeechLanguageModel.Configuration?
     var customVocabularyCacheKey: String?
     var customVocabularyOutputDirectory: URL?
+    var customVocabularyArtifacts: CustomVocabularyArtifacts?
+    var activeCustomVocabularyArtifacts: CustomVocabularyArtifacts?
     var activeResultKind: TranscriptionResultKind?
 
     // MARK: - Public Observables
@@ -267,7 +271,7 @@ public final class SpeechSession {
     ///
     /// The returned `AsyncThrowingStream` yields `SpeechTranscriber.Result` chunks containing both text and
     /// timing metadata (`.audioTimeRange`), as well as whether the result is final or volatile (partial).
-    /// Consume the stream with `for try await` and call `stopTranscribing()` to finish early.
+    /// Consume the stream with `for try await` and call `finishTranscribing()` to finish capture.
     ///
     /// - Parameter contextualStrings: Optional dictionary mapping contextual strings tags
     ///   to arrays of contextual words that help improve transcription accuracy. For example,
@@ -307,10 +311,11 @@ public final class SpeechSession {
 
         let run = LiveTranscriptionRun()
         liveTranscription = run
-        newContinuation.onTermination = { [weak self, weak run] _ in
+        newContinuation.onTermination = { [weak self, weak run] termination in
+            guard case .cancelled = termination else { return }
             Task { @MainActor [weak self, weak run] in
                 guard let self, let run else { return }
-                self.retireLiveTranscription(run, error: nil)
+                self.retireLiveTranscription(run, error: CancellationError())
             }
         }
 
@@ -346,66 +351,7 @@ public final class SpeechSession {
     public func startTranscribing(
         contextualStrings: [String]
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
-        return startTranscribing(contextualStrings: [.general: contextualStrings])
-    }
-
-    /// Stop capturing audio and finish the current transcription stream.
-    ///
-    /// Safe to call even if `startTranscribing()` has not been invoked or the stream has already
-    /// completed; the method simply waits for cleanup and returns.
-    /// For live transcription, waits for setup, admitted audio processing and result
-    /// delivery to exit. For file transcription, also waits for setup, file ingestion and result
-    /// delivery to exit before returning. The caller may then release its audio
-    /// file lease or remove its request-owned workspace.
-    public func stopTranscribing() async {
-        if let run = liveTranscription {
-            await retireLiveTranscription(run, error: nil)?.value
-            return
-        }
-        if let run = fileTranscription {
-            await retireFileTranscription(run, error: nil)?.value
-            return
-        }
-        // Every accepted transcription owns a run before setup can suspend.
-        // An idle stop must not start unowned cleanup that can overlap a new run.
-    }
-
-    /// Pause capture without tearing down the analyzer pipeline.
-    ///
-    /// Safe to call only when the session is actively transcribing live audio (microphone or
-    /// screen capture). Calls during file transcription or in any other state are ignored.
-    public func pauseTranscribing() async {
-        guard status == .transcribing, isPausableStreamingMode,
-              let run = liveTranscription, !run.retired else { return }
-        if streamingMode == .screenCapture {
-            await pauseScreenCaptureStreamingIfNeeded()
-        } else {
-            stopAudioStreaming()
-        }
-        guard liveTranscription === run, !run.retired else { return }
-        setStatus(.paused)
-    }
-
-    /// Resume a paused capture session.
-    /// - Throws: `SpeechSessionError` if audio streaming cannot restart.
-    public func resumeTranscribing() async throws {
-        guard status == .paused, isPausableStreamingMode,
-              let run = liveTranscription else { return }
-        do {
-            try requireCurrentLiveTranscription(run)
-            if streamingMode == .screenCapture {
-                let outcome = try await resumeScreenCaptureStreamingIfNeeded()
-                guard outcome.isCurrent() else { return }
-                if let error = outcome.error { throw error }
-                try requireCurrentLiveTranscription(run)
-            } else {
-                try startAudioStreaming()
-            }
-            setStatus(.transcribing)
-        } catch {
-            await retireLiveTranscription(run, error: error)?.value
-            throw error
-        }
+        startTranscribing(contextualStrings: [.general: contextualStrings])
     }
 
 }

@@ -1,5 +1,6 @@
 import Testing
 import AVFoundation
+import Speech
 @testable import AuralKit
 
 extension FileTranscriptionTests {
@@ -25,9 +26,9 @@ extension FileTranscriptionTests {
         }
     }
 
-    @Test("independent results cancellation fails the public stream, joins ingestion and permits retry")
+    @Test("independent results cancellation fails, joins ingestion and permits retry", arguments: [false, true])
     @MainActor
-    func independentFileResultsCancellationRetires() async throws {
+    func independentFileResultsCancellationRetires(throwsCancellation: Bool) async throws {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         try await withFileLifecycleFixture { fixture in
             let ingestion = fixture.gate()
@@ -46,7 +47,11 @@ extension FileTranscriptionTests {
             let consumer = fixture.transcribe()
             try await fixture.waitUntil { ingestion.entered }
             let run = try #require(fixture.session.fileTranscription)
-            analyzerResults.continuation.finish(throwing: CancellationError())
+            if throwsCancellation {
+                analyzerResults.continuation.finish(throwing: CancellationError())
+            } else {
+                run.recognizerTask?.cancel()
+            }
             try await fixture.waitUntil { run.retired }
             #expect(fixture.session.fileTranscription === run)
             ingestion.open()
@@ -204,4 +209,87 @@ extension FileTranscriptionTests {
         }
     }
 
+}
+
+extension FileTranscriptionTests {
+    @Test("A physical short read fails before closing analyzer input")
+    @MainActor
+    func physicalShortReadDoesNotSignalSuccessfulEOF() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            let file = try AVAudioFile(forReading: fixture.audioURL)
+            let format = try #require(AVAudioFormat(
+                commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true
+            ))
+            let declaredFrames = file.length + 1
+            let inputs = AsyncStream<AnalyzerInput>.makeStream()
+            defer { inputs.continuation.finish() }
+            let run = FileTranscriptionRun()
+            fixture.session.fileTranscription = run
+            fixture.session.inputBuilder = inputs.continuation
+            fixture.session.analyzerFormat = format
+            do {
+                _ = try await fixture.session.feedAudioFile(
+                    (file: file, totalFrames: declaredFrames), run: run,
+                    progressHandler: { _ in }
+                )
+                Issue.record("A premature physical EOF must report audioFileReadFailed")
+            } catch SpeechSessionError.audioFileReadFailed { }
+            let probe = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+            probe.frameLength = 1
+            if case .terminated = inputs.continuation.yield(AnalyzerInput(buffer: probe)) {
+                Issue.record("The feeder signaled input EOF before its read failure was admitted")
+            }
+        }
+    }
+
+    @Test("Early result EOF cannot hide a later ingestion or finalization failure", arguments: [false, true])
+    @MainActor
+    func earlyResultEOFPreservesProducerFailure(finalization: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            let failure = fixture.gate()
+            let results = AsyncThrowingStream<String, Error>.makeStream()
+            let forwarded = AsyncThrowingStream<String, Error>.makeStream()
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: {},
+                preparePipeline: { run in
+                    run.recognizerTask = fixture.session.makeFileRecognizerTask(
+                        run: run, results: results.stream,
+                        streamContinuation: forwarded.continuation
+                    )
+                },
+                ingest: {
+                    if !finalization {
+                        await failure.wait()
+                        throw FileLifecycleProbeError.ingestion
+                    }
+                    return true
+                },
+                finalizeInput: {
+                    guard finalization else {
+                        Issue.record("A failed ingester must not finalize input")
+                        return
+                    }
+                    await failure.wait()
+                    throw FileLifecycleProbeError.finalization
+                }
+            )
+            let consumer = fixture.consume()
+            try await fixture.waitUntil { failure.entered }
+            let run = try #require(fixture.session.fileTranscription)
+            results.continuation.finish()
+            await run.recognizerTask?.value
+            #expect(!run.retired)
+            #expect(fixture.session.fileTranscription === run)
+            failure.open()
+            await consumer.value
+            forwarded.continuation.finish()
+            #expect(fixture.errors.count == 1)
+            #expect(fixture.errors.first as? FileLifecycleProbeError ==
+                    (finalization ? .finalization : .ingestion))
+            #expect(fixture.session.fileTranscription == nil)
+            #expect(fixture.session.status == .idle)
+        }
+    }
 }

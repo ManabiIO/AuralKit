@@ -308,14 +308,19 @@ private final class PendingScreenInput: ScreenCaptureInput {
         await waiter.value
         try Task.checkCancellation()
     }
-    func pause() async {
+    func pause() async -> Bool {
         pauseEntered?.finish()
         if let pauseGate { for await _ in pauseGate {} }
+        return true
     }
-    func resume() async throws {}
-    func stop() async {
+    func resume(onCompletion: @escaping @MainActor (Result<Void, Error>) -> Void) async -> Error? {
+        onCompletion(.success(()))
+        return nil
+    }
+    func stop() -> Task<Void, Error> {
         stopped = true
         endSelection.finish()
+        return Task {}
     }
 }
 

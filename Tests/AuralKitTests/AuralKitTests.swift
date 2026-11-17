@@ -44,6 +44,8 @@ struct SpeechSessionStateTests {
     func stopTranscribingWithoutSessionIsNoOp() async {
         guard #available(iOS 26.0, macOS 26.0, *) else { return }
         let session = SpeechSession()
+        await session.finishTranscribing()
+        await session.cancelTranscribing()
         await session.stopTranscribing()
         #expect(await session.modelDownloadProgress == nil)
         #expect(session.status == .idle)
@@ -344,18 +346,21 @@ actor MockCustomVocabularyCompiler: CustomVocabularyCompiling {
         lastDescriptor = descriptor
         let cacheKey = try descriptor.stableCacheKey()
 
-        let outputDirectory = baseDirectory.appendingPathComponent(cacheKey, isDirectory: true)
-        try? fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let outputDirectory = baseDirectory
+            .appendingPathComponent("\(cacheKey)-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
-        let configuration = SFSpeechLanguageModel.Configuration(
-            languageModel: outputDirectory.appendingPathComponent("languageModel.bin"),
-            vocabulary: outputDirectory.appendingPathComponent("vocabulary.bin")
-        )
+        let model = outputDirectory.appendingPathComponent("languageModel.bin")
+        let vocabulary = outputDirectory.appendingPathComponent("vocabulary.bin")
+        try Data("model".utf8).write(to: model)
+        try Data("vocabulary".utf8).write(to: vocabulary)
+        let configuration = SFSpeechLanguageModel.Configuration(languageModel: model, vocabulary: vocabulary)
 
         return CustomVocabularyCompilation(
             configuration: configuration,
             cacheKey: cacheKey,
-            outputDirectory: outputDirectory
+            outputDirectory: outputDirectory,
+            artifacts: CustomVocabularyArtifacts(directory: outputDirectory)
         )
     }
 

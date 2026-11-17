@@ -48,8 +48,7 @@ struct SpeechDetectorLifecycleTests {
             let currentID = try #require(fixture.session.speechDetectorMonitorID)
             input.yield(false)
             try await fixture.waitUntil { fixture.values == [false] }
-            if failed { await source.fail() }
-            else { await source.finish() }
+            if failed { await source.fail() } else { await source.finish() }
             await old.value
             #expect(!fixture.session.isSpeechDetected)
             #expect(fixture.session.speechDetectorMonitorID == currentID)
@@ -70,8 +69,7 @@ struct SpeechDetectorLifecycleTests {
             input.yield(false)
             try await fixture.waitUntil { fixture.values == [false] }
             #expect(!fixture.session.isSpeechDetected)
-            if failed { input.finish(throwing: DetectorTestError.failed) }
-            else { input.finish() }
+            if failed { input.finish(throwing: DetectorTestError.failed) } else { input.finish() }
             await task.value
             #expect(fixture.session.isSpeechDetected)
             #expect(fixture.session.speechDetectorMonitorID == nil)
@@ -85,8 +83,7 @@ struct SpeechDetectorLifecycleTests {
     @available(iOS 26.0, macOS 26.0, *)
     private func withFixture(_ operation: @MainActor (DetectorFixture) async throws -> Void) async throws {
         let fixture = DetectorFixture()
-        do { try await operation(fixture) }
-        catch { await fixture.cleanup(); throw error }
+        do { try await operation(fixture) } catch { await fixture.cleanup(); throw error }
         await fixture.cleanup()
     }
 }
