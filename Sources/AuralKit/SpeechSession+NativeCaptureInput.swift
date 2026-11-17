@@ -5,6 +5,7 @@ import Speech
 @available(iOS 26.0, macOS 26.0, *)
 extension SpeechSession {
     var shouldUseNativeCaptureInputProvider: Bool {
+        guard audioSessionOwnership == .managed else { return false }
 #if swift(>=6.4)
         if #available(iOS 27.0, macOS 27.0, *) {
             return inputProviderPreference == .automatic

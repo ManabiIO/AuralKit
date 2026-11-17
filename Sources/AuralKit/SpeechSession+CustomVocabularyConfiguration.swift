@@ -16,6 +16,10 @@ extension SpeechSession {
     /// - Throws: A `SpeechSessionError` when the session is active, the descriptor locale mismatches, or
     ///   compilation fails.
     public func configureCustomVocabulary(_ vocabulary: CustomVocabulary?) async throws {
+        // Existing clear/replacement requests may supersede a compilation,
+        // while every outstanding request keeps transcription starts closed.
+        customVocabularyPreparationCount += 1
+        defer { customVocabularyPreparationCount -= 1 }
         try await configureCustomVocabulary(vocabulary, liveRun: nil)
     }
 
@@ -131,17 +135,17 @@ extension SpeechSession {
     }
 
     private func admitDictationTranscription() throws -> DictationAdmission {
-        guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             throw SpeechSessionError.recognitionStreamSetupFailed
         }
         let (stream, newContinuation) = AsyncThrowingStream<DictationTranscriber.Result, Error>.makeStream()
         let run = LiveTranscriptionRun()
         liveTranscription = run
-        newContinuation.onTermination = { [weak self, weak run] _ in
+        newContinuation.onTermination = { [weak self, weak run] termination in
+            guard case .cancelled = termination else { return }
             Task { @MainActor [weak self, weak run] in
                 guard let self, let run else { return }
-                self.retireLiveTranscription(run, error: nil)
+                self.retireLiveTranscription(run, error: CancellationError())
             }
         }
         setStatus(.preparing)
@@ -155,48 +159,36 @@ extension SpeechSession {
     ///   - customVocabulary: The descriptor describing phrases, pronunciations, and templates to prefer.
     ///   - contextualStrings: Optional contextual strings to further bias the transcription.
     /// - Returns: An async throwing stream emitting dictation transcriber results enriched by the custom vocabulary.
+    /// Returns only when compilation and pipeline setup are ready. Cancellation
+    /// joins both setup and retirement before throwing.
     /// - Throws: Errors encountered while configuring the vocabulary or starting the dictation pipeline.
     public func startTranscribing(
         customVocabulary: CustomVocabulary,
         contextualStrings: [AnalysisContext.ContextualStringsTag: [String]]? = nil
     ) async throws -> AsyncThrowingStream<DictationTranscriber.Result, Error> {
         try requireVocabularyAdmission(nil)
+        guard customVocabularyPreparationCount == 0 else {
+            throw SpeechSessionError.customVocabularyRequiresIdleSession
+        }
         let admission = try admitDictationTranscription()
         let stream = admission.stream
         let newContinuation = admission.continuation
         let run = admission.run
-        let preparation = Task { @MainActor in
-            try await self.configureCustomVocabulary(customVocabulary, liveRun: run)
-            try self.requireCurrentLiveTranscription(run)
-        }
-        run.setupTask = Task { @MainActor in
+        let setup = Task { @MainActor in
             do {
-                try await preparation.value
+                try self.requireCurrentLiveTranscription(run)
+                try await self.configureCustomVocabulary(customVocabulary, liveRun: run)
                 try self.requireCurrentLiveTranscription(run)
                 await self.startDictationPipeline(
                     run: run, with: newContinuation, contextualStrings: contextualStrings
                 )
             } catch {
-                self.retireLiveTranscription(run, error: error)
+                self.finishLivePipelineSetupFailure(error, run: run)
             }
         }
-        do {
-            return try await withTaskCancellationHandler {
-                try await preparation.value
-                try Task.checkCancellation()
-                return stream
-            } onCancel: {
-                preparation.cancel()
-                Task { @MainActor [weak self, weak run] in
-                    guard let self, let run else { return }
-                    self.retireLiveTranscription(run, error: nil)
-                }
-            }
-        } catch {
-            // The caller is outside setup, so it can join retirement before retrying.
-            await retireLiveTranscription(run, error: error)?.value
-            throw error
-        }
+        run.setupTask = setup
+        try await awaitLiveSetup(setup, run: run)
+        return stream
     }
 
     func clearCustomVocabularyArtifacts(removeDescriptor: Bool) {

@@ -22,12 +22,18 @@ final class CaptureSessionFixture {
             options: .init(), targetFormat: format, inputContinuation: inputs,
             onTermination: { [session, run] error in
                 Task { @MainActor in
-                    try? await terminationRelease?.wait()
                     await session.retireLiveTranscription(run, error: error)?.value
                 }
             }, transitions: owner,
             dismissPicker: { [dismissed] _ in dismissed.open() }
         )
+        if let terminationRelease {
+            // Hold an owned teardown resource, rather than delaying admission of
+            // the terminal owner that the public control must join.
+            session.liveTranscriptionHooks = LiveTranscriptionHooks(cancelAnalyzer: {
+                try? await terminationRelease.wait()
+            })
+        }
         session.screenCaptureInputProvider = provider
         session.streamingMode = .screenCapture
         session.setStatus(.transcribing)

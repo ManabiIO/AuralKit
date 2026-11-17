@@ -7,6 +7,12 @@ import Speech
 @MainActor
 final class LiveTranscriptionRun {
     var microphoneInput: MicrophoneAudioIngress?
+    var externalInput: ExternalAudioInput?
+    var ready = false
+    var startupError: Error?
+    var captureControlTask: Task<Void, Error>?
+    var captureControlDestination: SpeechSession.Status?
+    var captureControlID: UUID?
     var usesNativeInput = false
     var inputCompleted = false
     var resultsCompleted = false
@@ -21,6 +27,20 @@ final class LiveTranscriptionRun {
     var cancellationRequested = false
     var finishing = false
     var retired = false
+
+    func releaseRetiredResources() {
+        externalInput = nil
+        captureControlTask = nil
+        captureControlDestination = nil
+        captureControlID = nil
+        inputTask = nil
+        setupTask = nil
+        recognizerTask = nil
+        audioTasks.removeAll()
+        terminalTask = nil
+        finishTask = nil
+        screenStopTask = nil
+    }
 }
 
 /// Instance-local collaborators for deterministic lifecycle tests. Nil hooks
@@ -33,11 +53,44 @@ struct LiveTranscriptionHooks {
     )?
     var startAudio: (@MainActor @Sendable () throws -> Void)?
     var processAudio: (@MainActor @Sendable (SpeechSession.SendablePCMBuffer) async throws -> Void)?
+    var configureAudioSession: (@MainActor @Sendable () throws -> Void)?
+    var finalizeInput: (@MainActor @Sendable () async throws -> Bool)?
+    var cancelAnalyzer: (@MainActor @Sendable () async -> Void)?
+    var pauseCapture: (@MainActor @Sendable () async -> Void)?
+    var resumeCapture: (@MainActor @Sendable () async throws -> Void)?
 }
 
 @available(iOS 26.0, macOS 26.0, *)
 @MainActor
 extension SpeechSession {
+    var canStartTranscription: Bool {
+        continuation == nil && recognizerTask == nil && fileTranscription == nil
+            && liveTranscription == nil && streamingMode == .inactive
+            && customVocabularyPreparationCount == 0
+    }
+
+    /// Await the actual setup owner, retaining success even if results complete
+    /// before this caller resumes. Cancellation joins teardown before throwing.
+    func awaitLiveSetup(_ setup: Task<Void, Never>, run: LiveTranscriptionRun) async throws {
+        await withTaskCancellationHandler {
+            await setup.value
+        } onCancel: {
+            setup.cancel()
+            Task { @MainActor [weak self, weak run] in
+                guard let self, let run else { return }
+                self.retireLiveTranscription(run, error: CancellationError())
+            }
+        }
+        if Task.isCancelled {
+            await retireLiveTranscription(run, error: CancellationError())?.value
+            throw CancellationError()
+        }
+        if !run.ready || run.startupError != nil {
+            await retireLiveTranscription(run, error: run.startupError)?.value
+            throw run.startupError ?? run.terminalError ?? CancellationError()
+        }
+    }
+
     func requireCurrentLiveTranscription(_ run: LiveTranscriptionRun) throws {
         try Task.checkCancellation()
         guard liveTranscription === run, !run.retired else { throw CancellationError() }
@@ -77,7 +130,7 @@ extension SpeechSession {
     private func completeLiveResults(_ run: LiveTranscriptionRun) {
         guard liveTranscription === run, !run.retired else { return }
         run.resultsCompleted = true
-        if !run.usesNativeInput || run.inputCompleted {
+        if (!run.usesNativeInput && !run.finishing) || run.inputCompleted {
             retireLiveTranscription(run, error: nil)
         }
     }
@@ -109,6 +162,7 @@ extension SpeechSession {
     func finishLivePipelineSetupFailure(_ error: Error, run: LiveTranscriptionRun) {
         guard liveTranscription === run else { return }
         if run.finishing, Task.isCancelled { return }
+        if !run.ready { run.startupError = error }
         retireLiveTranscription(run, error: error)
     }
 
@@ -128,21 +182,19 @@ extension SpeechSession {
         run.finishing = true
         if status == .preparing { run.setupTask?.cancel() }
         prepareForStop()
+        run.externalInput?.finish()
         stopAudioStreaming()
         let screenStop = beginStoppingScreenCapture(run: run)
         let finish = Task { @MainActor in
             do {
                 try await screenStop?.value
+                // Controls request retirement but never join their own terminal owner.
+                try? await run.captureControlTask?.value
                 try self.requireCurrentLiveTranscription(run)
                 let audioTasks = Array(run.audioTasks.values)
                 for task in audioTasks { await task.value }
                 try self.requireCurrentLiveTranscription(run)
-                if let nativeInput = run.inputTask {
-                    self.tearDownNativeCaptureStreaming()
-                    await nativeInput.value
-                } else if try await !self.finishAnalyzerInput() {
-                    self.retireLiveTranscription(run, error: nil)
-                }
+                try await self.finishAcceptedLiveInput(run)
                 await results.value
             } catch {
                 // Producers request retirement without joining their own finish task.
@@ -154,11 +206,35 @@ extension SpeechSession {
         await run.terminalTask?.value
     }
 
+    private func finishAcceptedLiveInput(_ run: LiveTranscriptionRun) async throws {
+        if let nativeInput = run.inputTask {
+            tearDownNativeCaptureStreaming()
+            await nativeInput.value
+        } else {
+            let hasResults: Bool
+            if let finalize = liveTranscriptionHooks?.finalizeInput {
+                hasResults = try await finalize()
+            } else {
+                hasResults = try await finishAnalyzerInput()
+            }
+            try requireCurrentLiveTranscription(run)
+            if !hasResults {
+                retireLiveTranscription(run, error: nil)
+            } else {
+                // Input and finalization must settle even when
+                // result EOF arrived first. A late failure still wins.
+                completeLiveInput(run)
+            }
+        }
+    }
+
     @discardableResult
     func retireLiveTranscription(_ run: LiveTranscriptionRun, error: Error?) -> Task<Void, Never>? {
         guard liveTranscription === run else { return nil }
         if let terminal = run.terminalTask { return terminal }
         run.retired = true
+        run.externalInput?.finish()
+        run.captureControlTask?.cancel()
         // Cancellation closes input immediately; teardown still joins capture and setup.
         inputBuilder?.finish()
         inputBuilder = nil
@@ -177,6 +253,7 @@ extension SpeechSession {
                 run.terminalError = stopError
             }
             await run.setupTask?.value
+            try? await run.captureControlTask?.value
             run.inputTask?.cancel()
             // Setup may install a result reader after cancellation was requested.
             run.recognizerTask?.cancel()
@@ -196,13 +273,7 @@ extension SpeechSession {
             self.setStatus(.idle)
             await self.finishStream(error: run.cancellationRequested ? CancellationError() : run.terminalError)
             self.liveTranscription = nil
-            run.inputTask = nil
-            run.setupTask = nil
-            run.recognizerTask = nil
-            run.audioTasks.removeAll()
-            run.terminalTask = nil
-            run.finishTask = nil
-            run.screenStopTask = nil
+            run.releaseRetiredResources()
         }
         run.terminalTask = terminal
         return terminal

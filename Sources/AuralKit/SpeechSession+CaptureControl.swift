@@ -52,38 +52,100 @@ extension SpeechSession {
         }
     }
 
-    /// Pause capture without tearing down the analyzer pipeline.
-    ///
-    /// Safe to call only when the session is actively transcribing live audio (microphone or
-    /// screen capture). Calls during file transcription or in any other state are ignored.
+    /// Concurrent controls of the same kind share one native operation. Finish
+    /// and retirement join that operation before releasing run resources.
     public func pauseTranscribing() async {
-        guard status == .transcribing, isPausableStreamingMode,
-              let run = liveTranscription, !run.retired else { return }
-        if streamingMode == .screenCapture {
-            return await pauseScreenCaptureStreamingIfNeeded(run: run)
+        try? await transitionCapture(from: .transcribing, to: .paused) { run in
+            if let pause = self.liveTranscriptionHooks?.pauseCapture {
+                await pause()
+            } else if self.streamingMode == .screenCapture {
+                await self.pauseScreenCaptureStreamingIfNeeded(run: run)
+            } else {
+                self.stopAudioStreaming()
+            }
         }
-        stopAudioStreaming()
-        guard liveTranscription === run, !run.retired else { return }
-        setStatus(.paused)
     }
 
-    /// Resume a paused capture session.
-    /// - Throws: `SpeechSessionError` if audio streaming cannot restart.
     public func resumeTranscribing() async throws {
-        guard status == .paused, isPausableStreamingMode,
-              let run = liveTranscription else { return }
-        do {
-            try requireCurrentLiveTranscription(run)
-            if streamingMode == .screenCapture {
-                try await resumeScreenCaptureStreamingIfNeeded(run: run)
-                return
+        try await transitionCapture(from: .paused, to: .transcribing) { run in
+            if let resume = self.liveTranscriptionHooks?.resumeCapture {
+                try await resume()
+            } else if self.streamingMode == .screenCapture {
+                try await self.resumeScreenCaptureStreamingIfNeeded(run: run)
             } else {
-                try startAudioStreaming()
+                try self.startAudioStreaming()
             }
-            setStatus(.transcribing)
+        }
+    }
+
+    private func transitionCapture(
+        from source: Status, to destination: Status,
+        operation: @escaping @MainActor @Sendable (LiveTranscriptionRun) async throws -> Void
+    ) async throws {
+        guard let run = liveTranscription, !run.retired, !run.finishing,
+              isPausableStreamingMode else { return }
+        let task: Task<Void, Error>
+        if let current = run.captureControlTask, run.captureControlDestination == destination {
+            task = current
+        } else {
+            guard status == source else { return }
+            task = makeCaptureControlTask(
+                run: run, source: source, destination: destination, operation: operation
+            )
+        }
+        do {
+            try await task.value
+            if run.retired {
+                // A delegate can retire the run while the provider returns normally.
+                // The public caller joins teardown; the control task never joins itself.
+                await run.terminalTask?.value
+                if !run.cancellationRequested, let error = run.terminalError { throw error }
+            }
         } catch {
-            await retireLiveTranscription(run, error: error)?.value
+            // The operation only requests retirement; its public caller may join it.
+            await run.terminalTask?.value
             throw error
         }
+    }
+
+    private func makeCaptureControlTask(
+        run: LiveTranscriptionRun, source: Status, destination: Status,
+        operation: @escaping @MainActor @Sendable (LiveTranscriptionRun) async throws -> Void
+    ) -> Task<Void, Error> {
+        let previous = run.captureControlTask
+        let controlID = UUID()
+        let controlsScreen = streamingMode == .screenCapture
+        let usesHook = destination == .paused
+            ? liveTranscriptionHooks?.pauseCapture != nil : liveTranscriptionHooks?.resumeCapture != nil
+        let task = Task<Void, Error> { @MainActor in
+            defer {
+                if run.captureControlID == controlID {
+                    run.captureControlTask = nil
+                    run.captureControlDestination = nil
+                    run.captureControlID = nil
+                }
+            }
+            do {
+                // A control admitted after native publication may run before
+                // the old observer returns. Join only its predecessor task.
+                try? await previous?.value
+                try self.requireCurrentLiveTranscription(run)
+                try await operation(run)
+                guard self.liveTranscription === run, !run.retired, !run.finishing,
+                      run.captureControlID == controlID else { return }
+                // Screen transitions own their publication through picker replacements.
+                if (!controlsScreen || usesHook), self.status == source { self.setStatus(destination) }
+            } catch {
+                // An interrupted Resume must not convert Finish into cancellation.
+                if !run.retired, !run.finishing, run.captureControlID == controlID {
+                    self.retireLiveTranscription(run, error: error)
+                }
+                throw error
+            }
+        }
+        run.captureControlID = controlID
+        run.captureControlDestination = destination
+        run.captureControlTask = task
+        return task
     }
 }

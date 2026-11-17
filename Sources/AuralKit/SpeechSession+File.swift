@@ -267,8 +267,7 @@ extension SpeechSession {
         _ setup: @escaping @MainActor (SpeechSession, FileResultContinuation, FileTranscriptionRun) async -> Void
     ) -> AsyncThrowingStream<SpeechTranscriber.Result, Error> {
         let (stream, newContinuation) = AsyncThrowingStream<SpeechTranscriber.Result, Error>.makeStream()
-        guard continuation == nil, recognizerTask == nil,
-              fileTranscription == nil, liveTranscription == nil, streamingMode == .inactive else {
+        guard canStartTranscription else {
             newContinuation.finish(throwing: SpeechSessionError.recognitionStreamSetupFailed)
             return stream
         }
