@@ -1,8 +1,59 @@
 import Testing
 import AVFoundation
+import Speech
 @testable import AuralKit
 
 extension FileTranscriptionTests {
+    @Test("independent ingestion cancellation fails and retires the public stream", arguments: [false, true])
+    @MainActor
+    func independentFileIngestionCancellationRetires(throwsCancellation: Bool) async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: {}, preparePipeline: { _ in },
+                ingest: {
+                    if throwsCancellation { throw CancellationError() }
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return true
+                }
+            )
+            let consumer = fixture.transcribe()
+            await consumer.value
+            await fixture.session.stopTranscribing()
+            #expect(fixture.errors.count == 1)
+            #expect(fixture.errors.first is CancellationError)
+            #expect(fixture.session.fileTranscription == nil)
+            #expect(fixture.session.status == .idle)
+        }
+    }
+
+    @Test("a file result iterator that cancels itself at EOF fails the public stream")
+    @MainActor
+    func selfCancelledFileResultEOF() async throws {
+        guard #available(iOS 26.0, macOS 26.0, *) else { return }
+        try await withFileLifecycleFixture { fixture in
+            fixture.session.fileTranscriptionHooks = FileTranscriptionHooks(
+                authorize: {},
+                preparePipeline: { run in
+                    guard case .some(.speech(let continuation)) = fixture.session.continuation else {
+                        throw SpeechSessionError.recognitionStreamSetupFailed
+                    }
+                    run.recognizerTask = fixture.session.makeFileRecognizerTask(
+                        run: run, results: SelfCancelledFileResults(), streamContinuation: continuation
+                    )
+                },
+                ingest: { true }
+            )
+            let consumer = fixture.transcribe()
+            await consumer.value
+            await fixture.session.stopTranscribing()
+            #expect(fixture.errors.count == 1)
+            #expect(fixture.errors.first is CancellationError)
+            #expect(fixture.session.fileTranscription == nil)
+            #expect(fixture.session.status == .idle)
+        }
+    }
+
     @Test("stop joins suspended file authorization and prevents late pipeline startup")
     @MainActor
     func stopJoinsSuspendedFileAuthorization() async throws {
@@ -187,4 +238,18 @@ extension FileTranscriptionTests {
         }
     }
 
+}
+
+@available(iOS 26.0, macOS 26.0, *)
+private struct SelfCancelledFileResults: AsyncSequence, Sendable {
+    typealias Element = SpeechTranscriber.Result
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        mutating func next() async throws -> SpeechTranscriber.Result? {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return nil
+        }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator { AsyncIterator() }
 }
